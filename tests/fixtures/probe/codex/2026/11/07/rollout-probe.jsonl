@@ -1,0 +1,10 @@
+{"timestamp":"2026-11-07T02:00:00.000Z","type":"session_meta","payload":{"id":"c-probe","cwd":"C:\\work","parent_thread_id":null}}
+{"timestamp":"2026-11-07T02:10:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"await tools.exec_command({cmd: \"$x = 'SENTINEL-CX1'\"});"}}
+{"timestamp":"2026-11-07T02:10:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"const t = readFile(`${SENTINELDIR}/x.md`);"}}
+{"timestamp":"2026-11-07T02:10:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"await tools.apply_patch(`*** Begin Patch\n*** Add File: a.js\n+const c = readFileSync('SENTINEL-PATCH/x.md');\n*** End Patch`);"}}
+{"timestamp":"2026-11-07T02:10:00.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"f","arguments":"{\"command\": [\"bash\", \"run.sh\", \"SENTINEL-CX2\"]}"}}
+{"timestamp":"2026-11-07T02:15:00.000Z","type":"compacted","payload":{"message":"summary","replacement_history":[]}}
+{"timestamp":"2026-11-07T02:20:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"await tools.exec_command({cmd: \"$x = 'SENTINEL-CX1'\"});"}}
+{"timestamp":"2026-11-07T02:20:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"const t = readFile(`${SENTINELDIR}/x.md`);"}}
+{"timestamp":"2026-11-07T02:20:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c","input":"await tools.apply_patch(`*** Begin Patch\n*** Add File: a.js\n+const c = readFileSync('SENTINEL-PATCH/x.md');\n*** End Patch`);"}}
+{"timestamp":"2026-11-07T02:20:00.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"f","arguments":"{\"command\": [\"bash\", \"run.sh\", \"SENTINEL-CX2\"]}"}}

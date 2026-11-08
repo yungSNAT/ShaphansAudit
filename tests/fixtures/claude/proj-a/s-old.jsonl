@@ -1,0 +1,5 @@
+{"type":"attachment","timestamp":"2026-10-20T01:00:00.000Z","entrypoint":"claude-desktop","attachment":{"type":"hook_success","hookName":"SessionStart:startup","hookEvent":"SessionStart","command":"node tests/fixtures/hooks/hub-digest.js --claude","content":"SENTINEL-OLD-HOOK","durationMs":99999}}
+{"type":"assistant","timestamp":"2026-10-20T01:01:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"o1","name":"Bash","input":{"command":"cargo test | tail -1"}}]}}
+{"type":"user","timestamp":"2026-11-01T12:00:00.000Z","message":{"role":"user","content":"SENTINEL-OLDUSER"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"o3","name":"Bash","input":{"command":"cargo fmt --check"}}]}}
+{"type":"assistant","timestamp":"2026-11-02T01:00:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"o2","name":"Bash","input":{"command":"git status"}}]}}

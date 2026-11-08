@@ -1,0 +1,26 @@
+[package]
+name = "shaphansaudit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Find where your coding agent's tokens go, from its own transcripts."
+license = "FSL-1.1-ALv2"
+publish = false
+
+[[bin]]
+name = "shaphan"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde_json = "1"
+
+[lints.clippy]
+ref_option = "warn"
+too_many_lines = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
