@@ -114,11 +114,12 @@ impl Programs {
 
     /// Whether `word`, a command's first word or a hook's script as written, names a
     /// program: a common command or cmdlet, a program on `PATH`, or an existing file
-    /// with a program or script extension.
+    /// with a program or script extension. A share-style word is never looked up on
+    /// disk, so only its file name can match.
     #[must_use]
     pub fn has(&self, word: &str) -> bool {
         let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        if name.len() < word.len() {
+        if name.len() < word.len() && !share_style(word) {
             let path = Path::new(word);
             let ext_runnable = path
                 .extension()
@@ -145,6 +146,18 @@ impl Programs {
                 .iter()
                 .any(|e| self.names.contains(&format!("{key}{e}")))
     }
+}
+
+/// Whether `word` starts like a network share or a Windows device path, such as
+/// `\\host\share`, `//host/share`, `\\?\UNC\host\share` or `\??\UNC\host\share`.
+/// The word comes from a transcript, and looking it up on disk would contact the
+/// host it names. The rule is the same on every platform.
+// shortcut: only the spelling is read, so a path the system maps to a network location
+// (a mapped drive letter, a link, an automounted folder or a relative path under a
+// share) is still looked up like a local path; telling those apart needs a query of
+// the file system's type.
+fn share_style(word: &str) -> bool {
+    matches!(word.as_bytes(), [b'/' | b'\\', b'/' | b'\\' | b'?', ..])
 }
 
 /// A file Windows can run by name: no extension, or one in `PATHEXT`.
@@ -211,5 +224,54 @@ mod tests {
         assert!(!p.has(&full("docs/client.pdf")));
         assert!(!p.has("missing"));
         std::fs::remove_dir_all(&dir).expect("remove the temporary folder");
+    }
+
+    #[test]
+    fn share_paths_are_never_looked_up() {
+        let dir = std::env::temp_dir().join(format!("shaphan-share-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let script = dir.join("fsociety.ps1");
+        std::fs::write(&script, "").expect("stub");
+        let local = script.display().to_string();
+        let p = Programs::default();
+        assert!(p.has(&local));
+        // Share-style spellings of the local stub stand in for a share, so the test
+        // contacts no host: only a skipped lookup reports an existing script as unknown.
+        let prefixes: &[&str] = if cfg!(windows) {
+            &[r"\\?\", r"\??\"]
+        } else {
+            &["/"]
+        };
+        for prefix in prefixes {
+            let word = format!("{prefix}{local}");
+            assert!(Path::new(&word).is_file(), "{word} must exist");
+            assert!(!p.has(&word), "{word}");
+        }
+        std::fs::remove_dir_all(&dir).expect("remove the temporary folder");
+    }
+
+    #[test]
+    fn share_style_is_read_from_the_spelling() {
+        for w in [
+            r"\\host\share\run.ps1",
+            "//host/share/run.sh",
+            r"\/host/share/run.sh",
+            r"\\?\UNC\host\share\run.ps1",
+            r"\??\UNC\host\share\run.ps1",
+            r"\\.\UNC\host\share\run.ps1",
+        ] {
+            assert!(share_style(w), "{w}");
+        }
+        for w in [
+            r"C:\tools\run.ps1",
+            "/usr/local/bin/run.sh",
+            "./run.sh",
+            r"..\run.ps1",
+            "run.ps1",
+            "/",
+            "",
+        ] {
+            assert!(!share_style(w), "{w}");
+        }
     }
 }
