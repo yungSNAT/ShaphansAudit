@@ -1,5 +1,7 @@
 # ShaphansAudit
 
+[![CI](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml)
+
 `shaphan` reads the transcripts that Claude Code and Codex save on your machine and reports where tokens and checks are wasted: context loaded before the first reply, tool schemas loaded but never called, test output piped past its exit status, repeated polling, files re-read after a compaction and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
