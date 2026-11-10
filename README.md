@@ -29,8 +29,8 @@ This reads the last 7 days of `~/.claude/projects` and `~/.codex/sessions` and p
 | `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
 | `pipes` | Claude | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success |
-| `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit |
-| `rereads` | Claude, Codex | Files read again after a context compaction that had been read before it |
+| `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit; for Claude, also the polls of a command whose last result was an error and the characters polls returned |
+| `rereads` | Claude, Codex | Files read again after a context compaction that had been read before it; for Claude, also the characters those re-reads returned |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
 
 | Option | Default | Meaning |
@@ -53,7 +53,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. Version 0.1 reads Codex transcripts for `polls` and `rereads` only. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
+Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. Version 0.1 reads Codex transcripts for `polls` and `rereads` only, and reads their calls but not their results, so the columns that need a result are empty for Codex. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
 
 For usage and cost totals, use [ccusage](https://github.com/ryoppippi/ccusage).
 
