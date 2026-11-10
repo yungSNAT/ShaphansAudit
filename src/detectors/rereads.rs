@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use super::{codex_call, codex_call_line, input_str, name_of, tool_uses};
+use super::{
+    codex_call, codex_call_line, from_results, input_str, name_of, result_chars, tool_results,
+    tool_uses,
+};
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
 use crate::shell::{normalise_path, read_targets};
@@ -15,6 +18,7 @@ struct Counts {
     compactions: u64,
     reads: u64,
     rereads: u64,
+    reread_chars: u64,
 }
 
 /// Re-reads per compaction, for both agents.
@@ -23,6 +27,8 @@ pub struct Rereads {
     before: HashSet<String>,
     current: HashSet<String>,
     compacted_in_window: bool,
+    /// Claude `tool_use` ids of calls that re-read and whose result has not been read yet.
+    awaited: HashSet<String>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
 }
@@ -34,7 +40,11 @@ impl Detector for Rereads {
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => line.contains("\"compact_boundary\"") || line.contains("\"tool_use\""),
+            Agent::Claude => {
+                line.contains("\"compact_boundary\"")
+                    || line.contains("\"tool_use\"")
+                    || (!self.awaited.is_empty() && line.contains("\"tool_result\""))
+            }
             Agent::Codex => line.contains("\"type\":\"compacted\"") || codex_call_line(line),
         }
     }
@@ -43,6 +53,7 @@ impl Detector for Rereads {
         self.before.clear();
         self.current.clear();
         self.compacted_in_window = false;
+        self.awaited.clear();
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -57,8 +68,35 @@ impl Detector for Rereads {
             self.boundary(s, r.in_window);
             return;
         }
-        for path in read_paths(s.agent, r) {
-            self.read(s, &path, r.in_window);
+        match s.agent {
+            Agent::Claude => {
+                for b in tool_uses(r) {
+                    let mut reread = false;
+                    for path in claude_read_paths(b) {
+                        reread |= self.read(s, &path, r.in_window);
+                    }
+                    if reread && let Some(id) = b.get("id").and_then(Value::as_str) {
+                        self.awaited.insert(id.to_owned());
+                    }
+                }
+                for b in tool_results(r) {
+                    let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                    if self.awaited.remove(id) {
+                        self.totals
+                            .entry((s.agent, s.scope()))
+                            .or_default()
+                            .reread_chars += result_chars(b.get("content").unwrap_or(&Value::Null));
+                    }
+                }
+            }
+            Agent::Codex => {
+                if let Some(call) = codex_call(r) {
+                    let from_commands = call.commands().flat_map(read_targets);
+                    for path in from_commands.chain(call.reads.iter().cloned()) {
+                        self.read(s, &path, r.in_window);
+                    }
+                }
+            }
         }
     }
 
@@ -81,6 +119,7 @@ impl Detector for Rereads {
                 "compactions",
                 "reads",
                 "rereads",
+                "reread_chars",
                 "rereads_per_compaction",
                 "reread_share",
             ],
@@ -93,6 +132,7 @@ impl Detector for Rereads {
                 json!(c.compactions),
                 json!(c.reads),
                 json!(c.rereads),
+                from_results(*agent, c.reread_chars),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -110,6 +150,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. They are read for Claude only.".to_owned(),
             ],
         }
     }
@@ -128,20 +169,24 @@ impl Rereads {
         self.before.extend(current);
     }
 
-    fn read(&mut self, s: &Session, raw: &str, in_window: bool) {
+    /// Notes one read and says whether it is a re-read counted in the window.
+    fn read(&mut self, s: &Session, raw: &str, in_window: bool) -> bool {
         let path = normalise_path(raw);
         if path.is_empty() {
-            return;
+            return false;
         }
+        let mut reread = false;
         if in_window {
             let c = self.totals.entry((s.agent, s.scope())).or_default();
             c.reads += 1;
             if !self.current.contains(&path) && self.before.contains(&path) {
                 c.rereads += 1;
                 *self.paths.entry(path.clone()).or_default() += 1;
+                reread = true;
             }
         }
         self.current.insert(path);
+        reread
     }
 
     fn path_table(&self, opts: &Opts) -> Table {
@@ -157,24 +202,14 @@ impl Rereads {
     }
 }
 
-fn read_paths(agent: Agent, r: &Record<'_>) -> Vec<String> {
-    let mut out = Vec::new();
-    match agent {
-        Agent::Claude => {
-            for b in tool_uses(r) {
-                match name_of(b) {
-                    "Read" => out.extend(input_str(b, "file_path").map(str::to_owned)),
-                    "Bash" => out.extend(read_targets(input_str(b, "command").unwrap_or(""))),
-                    _ => {}
-                }
-            }
-        }
-        Agent::Codex => {
-            if let Some(call) = codex_call(r) {
-                out.extend(call.commands().flat_map(read_targets));
-                out.extend(call.reads);
-            }
-        }
+/// The paths one Claude `tool_use` block reads.
+fn claude_read_paths(b: &Value) -> Vec<String> {
+    match name_of(b) {
+        "Read" => input_str(b, "file_path")
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "Bash" => read_targets(input_str(b, "command").unwrap_or("")),
+        _ => Vec::new(),
     }
-    out
 }

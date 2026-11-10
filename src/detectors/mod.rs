@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::cli::Command;
 use crate::programs::Programs;
-use crate::scan::{Detector, Record};
+use crate::scan::{Agent, Detector, Record};
 use crate::shell::{self, Step};
 
 /// The detectors a subcommand runs, in report order.
@@ -102,6 +102,30 @@ pub fn text_of(content: &Value) -> String {
 #[must_use]
 pub fn chars(s: &str) -> u64 {
     s.chars().count() as u64
+}
+
+/// A count taken from tool results, which are read for Claude only: null for Codex.
+#[must_use]
+pub fn from_results(agent: Agent, n: u64) -> Value {
+    match agent {
+        Agent::Claude => Value::from(n),
+        Agent::Codex => Value::Null,
+    }
+}
+
+/// The size of a tool result: the characters of text in its content, which is a
+/// string or a list of blocks. A block without text, such as an image, adds nothing.
+#[must_use]
+pub fn result_chars(content: &Value) -> u64 {
+    match content {
+        Value::String(s) => chars(s),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .map(chars)
+            .sum(),
+        _ => 0,
+    }
 }
 
 /// Characters in a value's compact JSON, or in the string itself.

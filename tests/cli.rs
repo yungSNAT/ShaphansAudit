@@ -175,7 +175,7 @@ fn polls_separate_repeats_from_reruns_after_an_edit() {
     let doc = report("polls", &[]);
     let totals = rows(&doc, "polls", 0);
     for (agent, scope, commands, polls, reruns) in [
-        ("claude", "main", 13, 2, 1),
+        ("claude", "main", 14, 3, 1),
         ("claude", "subagent", 2, 1, 0),
         ("codex", "main", 5, 1, 1),
         ("codex", "subagent", 2, 1, 0),
@@ -214,25 +214,128 @@ fn polls_separate_repeats_from_reruns_after_an_edit() {
 }
 
 #[test]
+fn polls_report_result_characters_and_repeats_of_a_failed_run() {
+    let doc = report("polls", &[]);
+    let totals = rows(&doc, "polls", 0);
+    let cost = |row: &Value| {
+        (
+            row["polls_after_failure"].clone(),
+            row["poll_chars"].clone(),
+        )
+    };
+    // `agent-heavy status` fails, is polled (17 characters back) and polled again after
+    // that success (15 and 5 characters in 2 text blocks). The old session's `git status`
+    // failed before the window and is polled inside it, with no result in the transcript.
+    let main = find(
+        totals,
+        &[("agent", json!("claude")), ("scope", json!("main"))],
+    );
+    assert_eq!(cost(main), (json!(2), json!(37)));
+    let sub = find(
+        totals,
+        &[("agent", json!("claude")), ("scope", json!("subagent"))],
+    );
+    assert_eq!(cost(sub), (json!(0), json!(0)));
+    let verbs = rows(&doc, "polls", 1);
+    for (verb, expected) in [
+        ("agent-heavy", (json!(1), json!(37))),
+        ("git", (json!(1), json!(0))),
+    ] {
+        let row = find(verbs, &[("agent", json!("claude")), ("verb", json!(verb))]);
+        assert_eq!(cost(row), expected, "{verb}");
+    }
+    let codex: Vec<&Value> = totals
+        .iter()
+        .chain(verbs)
+        .filter(|row| row["agent"] == "codex")
+        .collect();
+    assert!(!codex.is_empty());
+    for row in codex {
+        for column in ["polls_after_failure", "poll_chars"] {
+            assert_eq!(row.get(column), Some(&Value::Null), "{column} in {row}");
+        }
+    }
+}
+
+const RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/results/claude");
+
+/// The main-scope row of a report over the result-pairing fixture.
+fn results_row(cmd: &str) -> Value {
+    let (code, stdout, stderr) = run(&[
+        cmd,
+        "--claude-root",
+        RESULTS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    find(rows(&doc, cmd, 0), &[("scope", json!("main"))]).clone()
+}
+
+#[test]
+fn polls_pair_results_by_id_within_one_session_and_the_window() {
+    let row = results_row("polls");
+    // After a failure: the first run in the window, whose last run failed before it, and
+    // its repeat. Not the rerun after an edit, the poll after the fixed run, 2 polls
+    // issued before either result, or the next session's poll.
+    assert_eq!(row["polls_after_failure"], 2);
+    // 22 + 14 + 12 + 10 + 11 in one session and 11 in the next. Not the 13 of a poll
+    // before the window, a first run's or a rerun's result, or a result in the second
+    // session that carries an id from the first.
+    assert_eq!(row["poll_chars"], 80);
+    assert_eq!(
+        (
+            row["commands"].clone(),
+            row["polls"].clone(),
+            row["reruns_after_edit"].clone()
+        ),
+        (json!(11), json!(7), json!(1))
+    );
+}
+
+#[test]
+fn rereads_count_a_call_once_and_only_in_the_window() {
+    let row = results_row("rereads");
+    // One `cat` re-reads 2 files and returns 18 characters. A re-read before the window
+    // adds nothing, though its result is inside it, and nor does a later read.
+    assert_eq!(
+        (
+            row["reads"].clone(),
+            row["rereads"].clone(),
+            row["reread_chars"].clone()
+        ),
+        (json!(3), json!(2), json!(18))
+    );
+}
+
+#[test]
 fn rereads_count_files_read_again_after_compaction() {
     let doc = report("rereads", &["--paths"]);
     let r = rows(&doc, "rereads", 0);
     let claude = find(r, &[("agent", json!("claude")), ("scope", json!("main"))]);
     assert_eq!(claude["compactions"], 1);
-    assert_eq!(claude["reads"], 5);
-    assert_eq!(claude["rereads"], 1);
-    assert_eq!(claude["reread_share"], 0.2);
+    assert_eq!(claude["reads"], 6);
+    assert_eq!(claude["rereads"], 2);
+    assert_eq!(claude["reread_share"], 0.33);
+    // The `Read` re-read returns 17 and 3 characters of text around an image, and the
+    // `tail` re-read 13. The first reads and a second read since the compaction add none.
+    assert_eq!(claude["reread_chars"], 33);
     let codex = find(r, &[("agent", json!("codex")), ("scope", json!("main"))]);
     assert_eq!(
         (codex["reads"].clone(), codex["rereads"].clone()),
         (json!(3), json!(1))
     );
+    assert_eq!(codex.get("reread_chars"), Some(&Value::Null));
     let paths = rows(&doc, "rereads", 1);
     let names: Vec<&str> = paths
         .iter()
         .map(|p| p["path"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(names, vec!["c:/work/a.md", "c:/work/x.md"]);
+    assert_eq!(names, vec!["c:/work/a.md", "c:/work/b.md", "c:/work/x.md"]);
 }
 
 #[test]
@@ -306,6 +409,7 @@ fn assert_no_sentinel(claude: &str, codex: &str) {
 #[test]
 fn output_never_contains_transcript_content() {
     assert_no_sentinel(CLAUDE, CODEX);
+    assert_no_sentinel(RESULTS, CODEX);
 }
 
 #[test]
