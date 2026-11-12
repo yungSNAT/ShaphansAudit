@@ -136,12 +136,13 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
     for r in meta.roots {
         let _ = writeln!(
             out,
-            "{}: {} files under {} (unreadable files or folders: {}, lines skipped: {})",
+            "{}: {} files under {} (unreadable files or folders: {}, lines skipped: {}, compressed files skipped: {})",
             r.agent.name(),
             r.files,
             meta.root(r),
             r.unreadable,
-            r.bad_lines
+            r.bad_lines,
+            r.compressed
         );
     }
     for s in meta.skipped_roots {
@@ -219,7 +220,8 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
         .iter()
         .map(|r| {
             json!({"agent": r.agent.name(), "root": meta.root(r), "files": r.files,
-                   "unreadable": r.unreadable, "lines_skipped": r.bad_lines})
+                   "unreadable": r.unreadable, "lines_skipped": r.bad_lines,
+                   "compressed_skipped": r.compressed})
         })
         .collect();
     let mut detectors = Map::new();

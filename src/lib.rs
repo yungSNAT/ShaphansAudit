@@ -107,10 +107,31 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
         }
         skipped.push(message);
     }
+    if wanted(Agent::Codex)
+        && cli.codex_root.is_none()
+        && let Some(h) = home
+    {
+        add_codex_archive(h, &mut roots, &mut skipped);
+    }
     // With no folder tried, as for `hooks --agent codex`, each section notes that
     // none of its transcripts were scanned.
     if roots.is_empty() && !skipped.is_empty() {
         return Err(skipped.join("; "));
     }
     Ok((roots, skipped))
+}
+
+/// Codex moves older sessions out of `sessions` into `archived_sessions`, so the
+/// default reads both. A missing archive folder is normal and needs no note.
+fn add_codex_archive(home: &str, roots: &mut Vec<(Agent, PathBuf)>, skipped: &mut Vec<String>) {
+    let path = PathBuf::from(home).join(".codex/archived_sessions");
+    if !path.is_dir() {
+        return;
+    }
+    if std::fs::read_dir(&path).is_ok() {
+        roots.push((Agent::Codex, path));
+    } else {
+        let shown = report::display_path(&path.display().to_string(), Some(home));
+        skipped.push(format!("codex transcript folder unreadable: {shown}"));
+    }
 }

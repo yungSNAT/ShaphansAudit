@@ -38,6 +38,11 @@ fn stubs() -> &'static Path {
 /// Runs `shaphan` from the crate folder, where fixture hook commands name scripts in
 /// `tests/fixtures/hooks`, with the stub programs first on `PATH`.
 fn run(args: &[&str]) -> (i32, String, String) {
+    run_env(args, &[])
+}
+
+/// As `run`, with extra environment variables.
+fn run_env(args: &[&str], env: &[(&str, &Path)]) -> (i32, String, String) {
     let system = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(
         std::iter::once(stubs().to_path_buf()).chain(std::env::split_paths(&system)),
@@ -46,6 +51,7 @@ fn run(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
         .args(args)
         .env("PATH", path)
+        .envs(env.iter().copied())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("binary runs");
@@ -380,6 +386,47 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 1);
     assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(6));
+}
+
+#[test]
+fn codex_default_reads_archived_sessions_and_counts_compressed_files() {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-archived");
+    let _ = std::fs::remove_dir_all(&home);
+    let rollout = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    for (dir, name) in [
+        ("sessions/2026/11/08", "rollout-live.jsonl"),
+        ("archived_sessions", "rollout-archived.jsonl"),
+        ("archived_sessions", "rollout-packed.jsonl.zst"),
+    ] {
+        let dir = home.join(".codex").join(dir);
+        std::fs::create_dir_all(&dir).expect("folder");
+        std::fs::write(dir.join(name), &rollout).expect("transcript");
+    }
+    let (code, stdout, stderr) = run_env(
+        &["polls", "--agent", "codex", "--since", SINCE, "--json"],
+        &[("HOME", &home), ("USERPROFILE", &home)],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let roots = doc["roots"].as_array().expect("roots");
+    let counts: Vec<(&str, &Value, &Value)> = roots
+        .iter()
+        .map(|r| {
+            let root = r["root"].as_str().expect("root");
+            (
+                root.rsplit('/').next().unwrap_or(root),
+                &r["files"],
+                &r["compressed_skipped"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("sessions", &json!(1), &json!(0)),
+            ("archived_sessions", &json!(1), &json!(1)),
+        ]
+    );
 }
 
 /// Runs `all` over two roots with each output flag and checks that no sentinel

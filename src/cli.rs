@@ -26,7 +26,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub claude_root: Option<PathBuf>,
 
-    /// Codex transcript folder [default: ~/.codex/sessions]
+    /// Codex transcript folder [default: ~/.codex/sessions and ~/.codex/archived_sessions]
     #[arg(long, global = true, value_name = "DIR")]
     pub codex_root: Option<PathBuf>,
 
