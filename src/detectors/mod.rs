@@ -104,6 +104,15 @@ pub fn chars(s: &str) -> u64 {
     s.chars().count() as u64
 }
 
+/// About how many tokens `chars` characters make, for the `*_tokens_est` columns.
+///
+/// shortcut: 4 characters a token, a rough average for English text and code; the
+/// model's tokenizer would give the true count, but it is not published.
+#[must_use]
+pub fn est_tokens(chars: u64) -> u64 {
+    chars.div_ceil(4)
+}
+
 /// A count taken from tool results, which are read for Claude only: null for Codex.
 #[must_use]
 pub fn from_results(agent: Agent, n: u64) -> Value {

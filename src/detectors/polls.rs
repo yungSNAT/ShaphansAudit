@@ -6,8 +6,8 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, from_results, input_str, name_of, result_chars, tool_results,
-    tool_uses,
+    codex_call, codex_call_line, est_tokens, from_results, input_str, name_of, result_chars,
+    tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -27,19 +27,21 @@ struct Counts {
 
 impl Counts {
     /// The columns every row shares, after those that key it.
-    const COLUMNS: [&'static str; 4] = [
+    const COLUMNS: [&'static str; 5] = [
         "polls",
         "polls_after_failure",
         "poll_chars",
+        "poll_tokens_est",
         "reruns_after_edit",
     ];
 
     /// The cells under `COLUMNS`.
-    fn cells(&self, agent: Agent) -> [Value; 4] {
+    fn cells(&self, agent: Agent) -> [Value; 5] {
         [
             json!(self.polls),
             from_results(agent, self.polls_after_failure),
             from_results(agent, self.poll_chars),
+            from_results(agent, est_tokens(self.poll_chars)),
             json!(self.reruns_after_edit),
         ]
     }
@@ -153,6 +155,7 @@ impl Detector for Polls {
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
                 "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. Both are read for Claude only.".to_owned(),
+                "Token estimates (tokens est) divide characters by 4; the model's own count differs.".to_owned(),
             ],
         }
     }

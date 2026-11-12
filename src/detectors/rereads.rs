@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, from_results, input_str, name_of, result_chars, tool_results,
-    tool_uses,
+    codex_call, codex_call_line, est_tokens, from_results, input_str, name_of, result_chars,
+    tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -120,6 +120,7 @@ impl Detector for Rereads {
                 "reads",
                 "rereads",
                 "reread_chars",
+                "reread_tokens_est",
                 "rereads_per_compaction",
                 "reread_share",
             ],
@@ -133,6 +134,7 @@ impl Detector for Rereads {
                 json!(c.reads),
                 json!(c.rereads),
                 from_results(*agent, c.reread_chars),
+                from_results(*agent, est_tokens(c.reread_chars)),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -151,6 +153,7 @@ impl Detector for Rereads {
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. They are read for Claude only.".to_owned(),
+                "Token estimates (tokens est) divide characters by 4; the model's own count differs.".to_owned(),
             ],
         }
     }
