@@ -429,6 +429,87 @@ fn codex_default_reads_archived_sessions_and_counts_compressed_files() {
     );
 }
 
+/// `rollout-main.jsonl` compressed by the zstd 1.5.7 command line tool with `--check`.
+const ZST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/zst/rollout-main.jsonl.zst"
+);
+
+/// Runs `polls` for Codex over one folder holding the given files.
+fn codex_polls(name: &str, files: &[(&str, &[u8])]) -> Value {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes).expect("transcript");
+    }
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "codex",
+        "--codex-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+fn root_counts(doc: &Value) -> [&Value; 4] {
+    let r = &doc["roots"][0];
+    [
+        &r["files"],
+        &r["unreadable"],
+        &r["lines_skipped"],
+        &r["compressed_skipped"],
+    ]
+}
+
+#[test]
+fn codex_reads_compressed_rollouts_as_it_reads_plain_ones() {
+    let plain = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    let packed = std::fs::read(ZST).expect("fixture");
+    let from_plain = codex_polls("zst-plain", &[("rollout.jsonl", &plain)]);
+    let from_packed = codex_polls("zst-packed", &[("rollout.jsonl.zst", &packed)]);
+    assert_eq!(
+        root_counts(&from_packed),
+        [&json!(1), &json!(0), &json!(0), &json!(0)]
+    );
+    assert_eq!(
+        from_packed["detectors"]["polls"],
+        from_plain["detectors"]["polls"]
+    );
+    assert!(
+        rows(&from_packed, "polls", 0)
+            .iter()
+            .any(|r| r["polls"] != 0)
+    );
+}
+
+#[test]
+fn codex_counts_every_compressed_rollout_it_cannot_decode() {
+    let packed = std::fs::read(ZST).expect("fixture");
+    let mut bad_sum = packed.clone();
+    *bad_sum.last_mut().expect("checksum") ^= 0xff;
+    let two_frames = [packed.as_slice(), packed.as_slice()].concat();
+    let doc = codex_polls(
+        "zst-bad",
+        &[
+            ("cut.jsonl.zst", &packed[..packed.len() / 2]),
+            ("sum.jsonl.zst", &bad_sum),
+            ("two.jsonl.zst", &two_frames),
+            ("text.jsonl.zst", b"{\"type\":\"session_meta\"}\n"),
+        ],
+    );
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(3), &json!(3), &json!(0), &json!(1)]
+    );
+}
+
 /// Runs `all` over two roots with each output flag and checks that no sentinel
 /// appears in any case: verb classes and paths are lower-cased.
 fn assert_no_sentinel(claude: &str, codex: &str) {

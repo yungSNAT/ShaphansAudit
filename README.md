@@ -53,7 +53,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. It cannot read compressed Codex transcripts (`*.jsonl.zst`), so it counts them under each folder as compressed files skipped. Version 0.1 reads Codex transcripts for `polls` and `rereads` only, and reads their calls but not their results, so the columns that need a result are empty for Codex. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
+Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. It reads compressed Codex transcripts (`*.jsonl.zst`) as it goes. One that does not open as zstd counts as a compressed file skipped; one that fails part way, has a bad checksum or holds more than one zstd frame counts as unreadable, and the records read before the failure still count. Version 0.1 reads Codex transcripts for `polls` and `rereads` only, and reads their calls but not their results, so the columns that need a result are empty for Codex. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
 
 For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). CodeBurn `optimize`, caveman `learn` and Claude Code's `/usage` report priced setup waste; according to their documentation as read on 12 November 2026, none reports test failures hidden by a pipe, hook durations and cancellations, or polls split from reruns after an edit.
 

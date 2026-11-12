@@ -2,11 +2,12 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
 use crate::report::{Opts, Section};
@@ -80,7 +81,8 @@ pub struct RootStats {
     pub files: u64,
     pub unreadable: u64,
     pub bad_lines: u64,
-    /// Compressed `*.jsonl.zst` transcripts in the window, which the scan cannot read.
+    /// `*.jsonl.zst` transcripts in the window that do not open as zstd, so nothing
+    /// in them was read.
     pub compressed: u64,
 }
 
@@ -115,8 +117,20 @@ pub fn scan(
             compressed: 0,
         };
         for path in list_files(root, cutoff, &mut st) {
+            let reader = match open(&path) {
+                Ok(r) => r,
+                Err(Open::NotZstd) => {
+                    st.compressed += 1;
+                    continue;
+                }
+                Err(Open::Io) => {
+                    st.files += 1;
+                    st.unreadable += 1;
+                    continue;
+                }
+            };
             st.files += 1;
-            if scan_file(&path, *agent, since, dets, &active, &mut st).is_err() {
+            if scan_file(reader, &path, *agent, since, dets, &active, &mut st).is_err() {
                 st.unreadable += 1;
             }
         }
@@ -150,7 +164,6 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                     continue;
                 }
                 match entry.metadata().and_then(|m| m.modified()) {
-                    Ok(m) if m >= cutoff && compressed => st.compressed += 1,
                     Ok(m) if m >= cutoff => out.push(path),
                     Ok(_) => {}
                     Err(_) => st.unreadable += 1,
@@ -165,8 +178,57 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
 /// shortcut: each line is read whole, so memory grows with the longest line (a few
 /// MB in real transcripts); a reader that skips lines over a cap would bound it.
 struct Lines {
-    reader: BufReader<File>,
+    reader: Box<dyn BufRead>,
     buf: Vec<u8>,
+}
+
+/// Why a transcript could not be opened.
+enum Open {
+    /// A `*.jsonl.zst` file without a zstd frame header.
+    NotZstd,
+    Io,
+}
+
+/// Opens a transcript, decoding a `*.jsonl.zst` one as it is read.
+fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
+    let file = BufReader::new(File::open(path).map_err(|_| Open::Io)?);
+    if path.extension().is_none_or(|x| x != "zst") {
+        return Ok(Box::new(file));
+    }
+    let decoder = StreamingDecoder::new(file).map_err(|_| Open::NotZstd)?;
+    Ok(Box::new(BufReader::new(OneFrame(decoder))))
+}
+
+/// Decodes a compressed transcript and fails, rather than stopping quietly, on a bad
+/// checksum or anything after the frame.
+///
+/// shortcut: reads one zstd frame, as Codex writes one per rollout (all 203 on one
+/// machine had one, 13 November 2026); a file with more frames counts as unreadable
+/// after its first. Decoding each frame in turn would be the upgrade.
+struct OneFrame(StreamingDecoder<BufReader<File>, FrameDecoder>);
+
+impl Read for OneFrame {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.0.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            let frame = &self.0.decoder;
+            if let Some(sum) = frame.get_checksum_from_data()
+                && frame.get_calculated_checksum() != Some(sum)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "zstd checksum mismatch",
+                ));
+            }
+            if !self.0.get_mut().fill_buf()?.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "data after the zstd frame",
+                ));
+            }
+        }
+        Ok(n)
+    }
 }
 
 impl Lines {
@@ -180,6 +242,7 @@ impl Lines {
 }
 
 fn scan_file(
+    reader: Box<dyn BufRead>,
     path: &Path,
     agent: Agent,
     since: DateTime<Utc>,
@@ -188,7 +251,7 @@ fn scan_file(
     st: &mut RootStats,
 ) -> io::Result<()> {
     let mut lines = Lines {
-        reader: BufReader::new(File::open(path)?),
+        reader,
         buf: Vec::new(),
     };
     let Some(first) = lines.next_line()? else {
