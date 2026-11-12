@@ -22,7 +22,7 @@ cargo install --locked --path .
 shaphan all
 ```
 
-This reads the last 7 days of `~/.claude/projects` and `~/.codex/sessions` and prints one section per detector. Run one detector by name, for example `shaphan hooks --since 24h`.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions` and `~/.codex/archived_sessions` and prints one section per detector. Run one detector by name, for example `shaphan hooks --since 24h`.
 
 | Command | Agents | Reports |
 |---|---|---|
@@ -38,7 +38,7 @@ This reads the last 7 days of `~/.claude/projects` and `~/.codex/sessions` and p
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
 | `--agent` | `all` | `claude`, `codex` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
-| `--codex-root DIR` | `~/.codex/sessions` | Codex transcript folder |
+| `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
 | `--json` | off | Print one JSON object with `schema_version` 1 |
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
@@ -53,9 +53,9 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. Version 0.1 reads Codex transcripts for `polls` and `rereads` only, and reads their calls but not their results, so the columns that need a result are empty for Codex. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
+Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. It cannot read compressed Codex transcripts (`*.jsonl.zst`), so it counts them under each folder as compressed files skipped. Version 0.1 reads Codex transcripts for `polls` and `rereads` only, and reads their calls but not their results, so the columns that need a result are empty for Codex. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
 
-For usage and cost totals, use [ccusage](https://github.com/ryoppippi/ccusage).
+For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). CodeBurn `optimize`, caveman `learn` and Claude Code's `/usage` report priced setup waste; according to their documentation as read on 12 November 2026, none reports test failures hidden by a pipe, hook durations and cancellations, or polls split from reruns after an edit.
 
 Named after Shaphan, the scribe who counted the temple silver and read the recovered scroll to the king (2 Kings 22, [NET](https://netbible.org)).
 

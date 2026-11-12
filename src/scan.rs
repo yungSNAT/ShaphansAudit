@@ -80,6 +80,8 @@ pub struct RootStats {
     pub files: u64,
     pub unreadable: u64,
     pub bad_lines: u64,
+    /// Compressed `*.jsonl.zst` transcripts in the window, which the scan cannot read.
+    pub compressed: u64,
 }
 
 /// Claude's request blobs repeat message content already in the transcript.
@@ -110,6 +112,7 @@ pub fn scan(
             files: 0,
             unreadable: 0,
             bad_lines: 0,
+            compressed: 0,
         };
         for path in list_files(root, cutoff, &mut st) {
             st.files += 1;
@@ -138,8 +141,16 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
             let path = entry.path();
             if ft.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|x| x == "jsonl") {
+            } else {
+                let compressed = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".jsonl.zst"));
+                if !compressed && path.extension().is_none_or(|x| x != "jsonl") {
+                    continue;
+                }
                 match entry.metadata().and_then(|m| m.modified()) {
+                    Ok(m) if m >= cutoff && compressed => st.compressed += 1,
                     Ok(m) if m >= cutoff => out.push(path),
                     Ok(_) => {}
                     Err(_) => st.unreadable += 1,
