@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, from_results, input_str, name_of, result_chars, tool_results,
-    tool_uses,
+    codex_call, codex_call_line, codex_output, codex_output_line, input_str, name_of, result_chars,
+    tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -27,7 +27,8 @@ pub struct Rereads {
     before: HashSet<String>,
     current: HashSet<String>,
     compacted_in_window: bool,
-    /// Claude `tool_use` ids of calls that re-read and whose result has not been read yet.
+    /// Claude `tool_use` ids or Codex call ids of calls that re-read and whose result
+    /// has not been read yet.
     awaited: HashSet<String>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
@@ -45,7 +46,12 @@ impl Detector for Rereads {
                     || line.contains("\"tool_use\"")
                     || (!self.awaited.is_empty() && line.contains("\"tool_result\""))
             }
-            Agent::Codex => line.contains("\"type\":\"compacted\"") || codex_call_line(line),
+            Agent::Codex => {
+                line.contains("\"type\":\"compacted\"")
+                    || codex_call_line(line)
+                    || (codex_output_line(line)
+                        && self.awaited.iter().any(|id| line.contains(id.as_str())))
+            }
         }
     }
 
@@ -92,9 +98,20 @@ impl Detector for Rereads {
             Agent::Codex => {
                 if let Some(call) = codex_call(r) {
                     let from_commands = call.commands().flat_map(read_targets);
+                    let mut reread = false;
                     for path in from_commands.chain(call.reads.iter().cloned()) {
-                        self.read(s, &path, r.in_window);
+                        reread |= self.read(s, &path, r.in_window);
                     }
+                    if reread && !call.call_id.is_empty() {
+                        self.awaited.insert(call.call_id);
+                    }
+                } else if let Some(out) = codex_output(r)
+                    && self.awaited.remove(&out.call_id)
+                {
+                    self.totals
+                        .entry((s.agent, s.scope()))
+                        .or_default()
+                        .reread_chars += out.chars;
                 }
             }
         }
@@ -132,7 +149,7 @@ impl Detector for Rereads {
                 json!(c.compactions),
                 json!(c.reads),
                 json!(c.rereads),
-                from_results(*agent, c.reread_chars),
+                json!(c.reread_chars),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -150,7 +167,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. They are read for Claude only.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed.".to_owned(),
             ],
         }
     }

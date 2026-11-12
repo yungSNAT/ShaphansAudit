@@ -250,17 +250,79 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         let row = find(verbs, &[("agent", json!("claude")), ("verb", json!(verb))]);
         assert_eq!(cost(row), expected, "{verb}");
     }
-    let codex: Vec<&Value> = totals
-        .iter()
-        .chain(verbs)
-        .filter(|row| row["agent"] == "codex")
-        .collect();
-    assert!(!codex.is_empty());
-    for row in codex {
-        for column in ["polls_after_failure", "poll_chars"] {
-            assert_eq!(row.get(column), Some(&Value::Null), "{column} in {row}");
-        }
+    // The Codex fixture's one output is not an `exec_command` result, so it adds none.
+    let codex = find(
+        totals,
+        &[("agent", json!("codex")), ("scope", json!("main"))],
+    );
+    assert_eq!(cost(codex), (json!(0), json!(0)));
+}
+
+const CODEX_RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-results");
+
+/// A detector's report over the Codex results fixture.
+fn codex_results(cmd: &str) -> Value {
+    let (code, stdout, stderr) = run(&[
+        cmd,
+        "--codex-root",
+        CODEX_RESULTS,
+        "--agent",
+        "codex",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn polls_read_codex_command_results() {
+    let doc = codex_results("polls");
+    let row = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
+    // `git status` exits 128, is polled (5 characters back) and polled again in a cell
+    // that runs 2 commands but prints 1 result, so that result pairs with neither.
+    assert_eq!(
+        (
+            row["commands"].clone(),
+            row["polls"].clone(),
+            row["polls_after_failure"].clone(),
+            row["poll_chars"].clone()
+        ),
+        (json!(5), json!(2), json!(1), json!(5))
+    );
+}
+
+#[test]
+fn pipes_read_codex_test_runs_and_their_exit_codes() {
+    let doc = codex_results("pipes");
+    let pipes = &doc["detectors"]["pipes"];
+    let expected = [
+        ("test_runs", 1),
+        ("unguarded", 1),
+        ("unguarded_results_found", 1),
+        ("unguarded_reported_success", 1),
+        ("showed_a_failure_but_reported_success", 1),
+    ];
+    let codex = find(rows(&doc, "pipes", 0), &[("agent", json!("codex"))]);
+    for (key, n) in expected {
+        assert_eq!(pipes["summary"][key], n, "{key}");
+        assert_eq!(codex[key], n, "{key}");
     }
+}
+
+#[test]
+fn rereads_count_codex_output_characters() {
+    let doc = codex_results("rereads");
+    let row = find(rows(&doc, "rereads", 0), &[("scope", json!("main"))]);
+    assert_eq!(
+        (
+            row["reads"].clone(),
+            row["rereads"].clone(),
+            row["reread_chars"].clone()
+        ),
+        (json!(2), json!(1), json!(5))
+    );
 }
 
 const RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/results/claude");
@@ -335,7 +397,8 @@ fn rereads_count_files_read_again_after_compaction() {
         (codex["reads"].clone(), codex["rereads"].clone()),
         (json!(3), json!(1))
     );
-    assert_eq!(codex.get("reread_chars"), Some(&Value::Null));
+    // Its re-read's call id has no output after it.
+    assert_eq!(codex["reread_chars"], 0);
     let paths = rows(&doc, "rereads", 1);
     let names: Vec<&str> = paths
         .iter()
@@ -457,6 +520,7 @@ fn assert_no_sentinel(claude: &str, codex: &str) {
 fn output_never_contains_transcript_content() {
     assert_no_sentinel(CLAUDE, CODEX);
     assert_no_sentinel(RESULTS, CODEX);
+    assert_no_sentinel(RESULTS, CODEX_RESULTS);
 }
 
 #[test]
@@ -513,8 +577,8 @@ fn text_output_has_a_section_per_detector() {
 
 #[test]
 fn a_detector_without_its_agent_says_so() {
-    let doc = report("pipes", &["--agent", "codex"]);
-    let notes = doc["detectors"]["pipes"]["notes"]
+    let doc = report("hooks", &["--agent", "codex"]);
+    let notes = doc["detectors"]["hooks"]["notes"]
         .as_array()
         .expect("notes");
     assert_eq!(

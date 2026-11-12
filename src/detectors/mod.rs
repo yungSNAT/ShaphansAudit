@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::cli::Command;
 use crate::programs::Programs;
-use crate::scan::{Agent, Detector, Record};
+use crate::scan::{Detector, Record};
 use crate::shell::{self, Step};
 
 /// The detectors a subcommand runs, in report order.
@@ -104,15 +104,6 @@ pub fn chars(s: &str) -> u64 {
     s.chars().count() as u64
 }
 
-/// A count taken from tool results, which are read for Claude only: null for Codex.
-#[must_use]
-pub fn from_results(agent: Agent, n: u64) -> Value {
-    match agent {
-        Agent::Claude => Value::from(n),
-        Agent::Codex => Value::Null,
-    }
-}
-
 /// The size of a tool result: the characters of text in its content, which is a
 /// string or a list of blocks. A block without text, such as an image, adds nothing.
 #[must_use]
@@ -140,6 +131,8 @@ pub fn json_chars(v: &Value) -> u64 {
 /// What one Codex tool call runs and edits, in order, and what it reads.
 #[derive(Debug, Default)]
 pub struct CodexCall {
+    /// The id its output will carry, or "" when it has none.
+    pub call_id: String,
     pub steps: Vec<Step>,
     pub reads: Vec<String>,
 }
@@ -167,15 +160,22 @@ pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {
         return None;
     }
     let p = r.value.get("payload")?;
+    let call_id = p
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     match p.get("type")?.as_str()? {
         "custom_tool_call" if name_of(p) == "exec" => {
             let input = p.get("input")?.as_str()?;
             Some(CodexCall {
+                call_id,
                 steps: shell::codex_steps(input),
                 reads: shell::codex_read_calls(input),
             })
         }
         "function_call" if name_of(p) == "apply_patch" => Some(CodexCall {
+            call_id,
             steps: vec![Step::Edit],
             ..CodexCall::default()
         }),
@@ -183,12 +183,90 @@ pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {
             let args: Value = serde_json::from_str(p.get("arguments")?.as_str()?).ok()?;
             let cmd = function_command(args.get("cmd").or_else(|| args.get("command"))?)?;
             Some(CodexCall {
+                call_id,
                 steps: vec![Step::Command(cmd)],
                 ..CodexCall::default()
             })
         }
         _ => None,
     }
+}
+
+/// What a Codex `exec` cell printed.
+#[derive(Debug, Default)]
+pub struct CodexOutput {
+    pub call_id: String,
+    /// Characters of text in the output.
+    pub chars: u64,
+    /// The `exec_command` results it printed, in order.
+    pub results: Vec<CommandResult>,
+}
+
+/// One `exec_command` result as an `exec` cell prints it.
+#[derive(Debug)]
+pub struct CommandResult {
+    pub exit_code: i64,
+    pub output: String,
+}
+
+/// True for lines that may hold a Codex `exec` cell's output.
+#[must_use]
+pub fn codex_output_line(line: &str) -> bool {
+    line.contains("\"custom_tool_call_output\"")
+}
+
+/// Reads a Codex `exec` cell's output: a list of text items, of which those that are
+/// JSON objects with an `exit_code` and an `output` are `exec_command` results.
+///
+/// shortcut: results are found only where the cell prints a result object whole, as
+/// `text(await tools.exec_command(...))` does; a cell that prints parts of one, or
+/// none, gives no results. Reading the cell's code to follow each value would be the
+/// upgrade.
+#[must_use]
+pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
+    if r.kind() != "response_item" {
+        return None;
+    }
+    let p = r.value.get("payload")?;
+    if p.get("type")?.as_str()? != "custom_tool_call_output" {
+        return None;
+    }
+    let texts: Vec<&str> = p
+        .get("output")?
+        .as_array()?
+        .iter()
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect();
+    Some(CodexOutput {
+        call_id: p.get("call_id")?.as_str()?.to_owned(),
+        chars: texts.iter().map(|t| chars(t)).sum(),
+        results: texts.iter().filter_map(|t| command_result(t)).collect(),
+    })
+}
+
+fn command_result(text: &str) -> Option<CommandResult> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    Some(CommandResult {
+        exit_code: v.get("exit_code")?.as_i64()?,
+        output: v.get("output")?.as_str()?.to_owned(),
+    })
+}
+
+/// The results of a call's commands, by position, when the cell printed one result
+/// per command; otherwise none, as which result belongs to which command is unknown.
+#[must_use]
+pub fn paired(out: &CodexOutput, commands: usize) -> &[CommandResult] {
+    if out.results.len() == commands {
+        &out.results
+    } else {
+        &[]
+    }
+}
+
+/// The key a Codex command's result is awaited under: its call and position.
+#[must_use]
+pub fn codex_key(call_id: &str, index: usize) -> String {
+    format!("{call_id}#{index}")
 }
 
 /// A `cmd` argument as one command line; `[shell, flag, script]` gives the script.
