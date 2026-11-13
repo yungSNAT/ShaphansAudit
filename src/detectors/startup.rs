@@ -144,7 +144,7 @@ impl Detector for Startup {
         table.truncate(opts.limit);
         Section {
             name: "startup",
-            title: "loaded before the first reply of each main session (Claude)",
+            title: "loaded before the first non-synthetic reply of each main session (Claude)",
             summary: self.summary(),
             tables: vec![table],
             notes: vec![

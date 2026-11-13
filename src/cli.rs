@@ -48,7 +48,7 @@ pub struct Cli {
 pub enum Command {
     /// Every detector, in one pass
     All,
-    /// What loads before the first reply of each main session (Claude)
+    /// What loads before the first non-synthetic reply of each main session (Claude)
     Startup,
     /// Tool schemas loaded against tools called (Claude)
     Schemas,

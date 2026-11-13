@@ -159,6 +159,33 @@ fn startup_tokens_skip_synthetic_replies_and_unusable_usage() {
 }
 
 #[test]
+fn startup_does_not_measure_a_session_whose_replies_are_all_synthetic() {
+    let root = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/startup-synthetic"
+    );
+    let (code, stdout, stderr) = run(&[
+        "startup",
+        "--agent",
+        "claude",
+        "--claude-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(root_counts(&doc)[0], &json!(1), "the session was read");
+    let s = &doc["detectors"]["startup"]["summary"];
+    assert_eq!(s["sessions"], 0);
+    assert_eq!(s["sessions_with_request_tokens"], 0);
+    assert_eq!(s["median_first_request_tokens"], Value::Null);
+    assert!(rows(&doc, "startup", 0).is_empty());
+}
+
+#[test]
 fn startup_alone_stops_reading_at_the_first_reply() {
     // The main session ends in a cut line long after its first reply.
     assert_eq!(report("startup", &[])["roots"][0]["lines_skipped"], 0);

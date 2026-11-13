@@ -1,0 +1,4 @@
+{"type":"attachment","timestamp":"2026-11-08T05:00:00.000Z","attachment":{"type":"skill_listing","content":"SENTINEL-T"}}
+{"type":"assistant","timestamp":"2026-11-08T05:01:00.000Z","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"SENTINEL-R"}],"usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"attachment","timestamp":"2026-11-08T05:02:00.000Z","attachment":{"type":"instructions","files":[{"path":"/s/CLAUDE.md","content":"SENTINEL"}]}}
+{"type":"assistant","timestamp":"2026-11-08T05:03:00.000Z","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"SENTINEL-R"}],"usage":{"input_tokens":0,"output_tokens":0}}}
