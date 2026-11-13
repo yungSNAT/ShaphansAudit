@@ -9,6 +9,18 @@ use super::{est_tokens, name_of, tool_uses};
 use crate::report::{Opts, Section, Table, median};
 use crate::scan::{Agent, Detector, Record, Session};
 
+const COLUMNS: [&str; 9] = [
+    "scope",
+    "tool",
+    "tools",
+    "sessions_loaded",
+    "sessions_called",
+    "calls",
+    "median_chars",
+    "idle_chars",
+    "idle_tokens_est",
+];
+
 #[derive(Default)]
 struct Current {
     loaded: BTreeMap<String, u64>,
@@ -130,17 +142,7 @@ impl Detector for Schemas {
         rows.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
         let mut table = Table::new(
             "By tool or MCP server, most idle characters first",
-            vec![
-                "scope",
-                "tool",
-                "tools",
-                "sessions_loaded",
-                "sessions_called",
-                "calls",
-                "median_chars",
-                "idle_chars",
-                "idle_tokens_est",
-            ],
+            COLUMNS.to_vec(),
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);

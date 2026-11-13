@@ -152,11 +152,7 @@ impl Detector for Startup {
                 ("median_total_chars".to_owned(), json!(median(&self.totals))),
                 (
                     "median_first_request_tokens".to_owned(),
-                    if self.first_tokens.is_empty() {
-                        Value::Null
-                    } else {
-                        json!(median(&self.first_tokens))
-                    },
+                    json!((!self.first_tokens.is_empty()).then(|| median(&self.first_tokens))),
                 ),
             ],
             tables: vec![table],
