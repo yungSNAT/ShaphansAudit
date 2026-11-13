@@ -104,6 +104,8 @@ fn startup_measures_main_sessions_started_in_the_window() {
     assert_eq!(s["sessions"], 1);
     assert_eq!(s["entry_points"], "claude-desktop 1");
     assert_eq!(s["median_total_chars"], 230);
+    assert_eq!(s["sessions_with_request_tokens"], 1);
+    assert_eq!(s["median_first_request_tokens"], 4312);
     let r = rows(&doc, "startup", 0);
     for (piece, chars) in [
         ("tool schemas (loaded)", 121),
@@ -127,6 +129,36 @@ fn startup_measures_main_sessions_started_in_the_window() {
 }
 
 #[test]
+fn startup_tokens_skip_synthetic_replies_and_unusable_usage() {
+    // 5 sessions: first replies recording 100, 300 and (after a synthetic reply and an
+    // instruction file) 200 input tokens, one recording none and one whose sum
+    // overflows.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/startup-tokens");
+    let (code, stdout, stderr) = run(&[
+        "startup",
+        "--agent",
+        "claude",
+        "--claude-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let s = &doc["detectors"]["startup"]["summary"];
+    assert_eq!(s["sessions"], 5);
+    assert_eq!(s["sessions_with_request_tokens"], 3);
+    assert_eq!(s["median_first_request_tokens"], 200);
+    let file = find(
+        rows(&doc, "startup", 0),
+        &[("piece", json!("file: /t/CLAUDE.md"))],
+    );
+    assert_eq!(file["median_chars"], 8);
+}
+
+#[test]
 fn startup_alone_stops_reading_at_the_first_reply() {
     // The main session ends in a cut line long after its first reply.
     assert_eq!(report("startup", &[])["roots"][0]["lines_skipped"], 0);
@@ -144,8 +176,12 @@ fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let r = rows(&doc, "schemas", 0);
     assert_eq!(r[0]["tool"], "mcp__unused__*");
     assert_eq!(
-        (r[0]["idle_chars"].clone(), r[0]["sessions_called"].clone()),
-        (json!(28), json!(0))
+        (
+            r[0]["idle_chars"].clone(),
+            r[0]["idle_tokens_est"].clone(),
+            r[0]["sessions_called"].clone()
+        ),
+        (json!(28), json!(7), json!(0))
     );
     let browser = find(
         r,
@@ -235,6 +271,7 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         (
             row["polls_after_failure"].clone(),
             row["poll_chars"].clone(),
+            row["poll_tokens_est"].clone(),
         )
     };
     // `agent-heavy status` fails, is polled (17 characters back) and polled again after
@@ -244,16 +281,16 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         totals,
         &[("agent", json!("claude")), ("scope", json!("main"))],
     );
-    assert_eq!(cost(main), (json!(2), json!(37)));
+    assert_eq!(cost(main), (json!(2), json!(37), json!(10)));
     let sub = find(
         totals,
         &[("agent", json!("claude")), ("scope", json!("subagent"))],
     );
-    assert_eq!(cost(sub), (json!(0), json!(0)));
+    assert_eq!(cost(sub), (json!(0), json!(0), json!(0)));
     let verbs = rows(&doc, "polls", 1);
     for (verb, expected) in [
-        ("agent-heavy", (json!(1), json!(37))),
-        ("git", (json!(1), json!(0))),
+        ("agent-heavy", (json!(1), json!(37), json!(10))),
+        ("git", (json!(1), json!(0), json!(0))),
     ] {
         let row = find(verbs, &[("agent", json!("claude")), ("verb", json!(verb))]);
         assert_eq!(cost(row), expected, "{verb}");
@@ -263,7 +300,7 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         totals,
         &[("agent", json!("codex")), ("scope", json!("main"))],
     );
-    assert_eq!(cost(codex), (json!(0), json!(0)));
+    assert_eq!(cost(codex), (json!(0), json!(0), json!(0)));
 }
 
 const CODEX_RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-results");
@@ -455,6 +492,7 @@ fn rereads_count_files_read_again_after_compaction() {
     // The `Read` re-read returns 17 and 3 characters of text around an image, and the
     // `tail` re-read 13. The first reads and a second read since the compaction add none.
     assert_eq!(claude["reread_chars"], 33);
+    assert_eq!(claude["reread_tokens_est"], 9);
     let codex = find(r, &[("agent", json!("codex")), ("scope", json!("main"))]);
     assert_eq!(
         (codex["reads"].clone(), codex["rereads"].clone()),
@@ -462,6 +500,7 @@ fn rereads_count_files_read_again_after_compaction() {
     );
     // Its re-read's call id has no output after it.
     assert_eq!(codex["reread_chars"], 0);
+    assert_eq!(codex["reread_tokens_est"], 0);
     let paths = rows(&doc, "rereads", 1);
     let names: Vec<&str> = paths
         .iter()
@@ -552,6 +591,161 @@ fn codex_default_reads_archived_sessions_and_counts_compressed_files() {
             ("sessions", &json!(1), &json!(0)),
             ("archived_sessions", &json!(1), &json!(1)),
         ]
+    );
+}
+
+/// `rollout-main.jsonl` compressed by the zstd 1.5.7 command line tool with `--check`.
+const ZST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/zst/rollout-main.jsonl.zst"
+);
+
+/// Runs `polls` for Codex over one folder holding the given files.
+fn codex_polls(name: &str, files: &[(&str, &[u8])]) -> Value {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes).expect("transcript");
+    }
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "codex",
+        "--codex-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+fn root_counts(doc: &Value) -> [&Value; 4] {
+    let r = &doc["roots"][0];
+    [
+        &r["files"],
+        &r["unreadable"],
+        &r["lines_skipped"],
+        &r["compressed_skipped"],
+    ]
+}
+
+#[test]
+fn codex_reads_compressed_rollouts_as_it_reads_plain_ones() {
+    let plain = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    let packed = std::fs::read(ZST).expect("fixture");
+    let from_plain = codex_polls("zst-plain", &[("rollout.jsonl", &plain)]);
+    let from_packed = codex_polls("zst-packed", &[("rollout.jsonl.zst", &packed)]);
+    assert_eq!(
+        root_counts(&from_packed),
+        [&json!(1), &json!(0), &json!(0), &json!(0)]
+    );
+    assert_eq!(
+        from_packed["detectors"]["polls"],
+        from_plain["detectors"]["polls"]
+    );
+    assert!(
+        rows(&from_packed, "polls", 0)
+            .iter()
+            .any(|r| r["polls"] != 0)
+    );
+}
+
+#[test]
+fn codex_counts_every_compressed_rollout_it_cannot_decode() {
+    let packed = std::fs::read(ZST).expect("fixture");
+    let mut bad_sum = packed.clone();
+    *bad_sum.last_mut().expect("checksum") ^= 0xff;
+    let two_frames = [packed.as_slice(), packed.as_slice()].concat();
+    let trailing_byte = [packed.as_slice(), b"\0"].concat();
+    // Frame headers asking for a 256 MiB window, and for one 1 GiB segment, above
+    // the decoder's 128 MiB limit.
+    let magic = [0x28, 0xb5, 0x2f, 0xfd];
+    let big_window = [&magic[..], &[0x00, 0x90]].concat();
+    let big_segment = [&magic[..], &[0xa0, 0, 0, 0, 0x40]].concat();
+    let doc = codex_polls(
+        "zst-bad",
+        &[
+            ("cut.jsonl.zst", &packed[..packed.len() / 2]),
+            ("head.jsonl.zst", &packed[..5]),
+            ("sum.jsonl.zst", &bad_sum),
+            ("two.jsonl.zst", &two_frames),
+            ("byte.jsonl.zst", &trailing_byte),
+            ("window.jsonl.zst", &big_window),
+            ("segment.jsonl.zst", &big_segment),
+            ("text.jsonl.zst", b"{\"type\":\"session_meta\"}\n"),
+            ("short.jsonl.zst", &magic[..2]),
+        ],
+    );
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(7), &json!(7), &json!(0), &json!(2)]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_counts_a_compressed_rollout_whose_read_fails_as_unreadable() {
+    // A link to a folder opens, but reading the magic number from it fails.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("zst-read-error");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    let link = dir.join("rollout.jsonl.zst");
+    std::os::unix::fs::symlink(env!("CARGO_TARGET_TMPDIR"), link).expect("link");
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "codex",
+        "--codex-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(1), &json!(1), &json!(0), &json!(0)]
+    );
+}
+
+/// A zstd frame with a 1 MiB window and no checksum that decodes to a line of
+/// `a` 128 KiB longer than the 64 MiB line cap, then `rest`, of at most 128 KiB.
+fn frame_with_long_line(rest: &[u8]) -> Vec<u8> {
+    let block = |size: usize, kind: u32, last: bool| {
+        let header =
+            (u32::try_from(size).expect("block size") << 3) | (kind << 1) | u32::from(last);
+        header.to_le_bytes()[..3].to_vec()
+    };
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x50];
+    for _ in 0..513 {
+        // An RLE block: 128 KiB of one byte.
+        frame.extend(block(128 << 10, 1, false));
+        frame.push(b'a');
+    }
+    frame.extend(block(rest.len(), 0, true));
+    frame.extend_from_slice(rest);
+    frame
+}
+
+#[test]
+fn codex_skips_a_decoded_line_over_the_cap_and_reads_the_rest() {
+    let plain = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    let packed = frame_with_long_line(&[b"\n", plain.as_slice()].concat());
+    let from_plain = codex_polls("zst-long-plain", &[("rollout.jsonl", &plain)]);
+    let from_packed = codex_polls("zst-long", &[("rollout.jsonl.zst", &packed)]);
+    assert_eq!(
+        root_counts(&from_packed),
+        [&json!(1), &json!(0), &json!(1), &json!(0)]
+    );
+    assert_eq!(
+        from_packed["detectors"]["polls"],
+        from_plain["detectors"]["polls"]
     );
 }
 

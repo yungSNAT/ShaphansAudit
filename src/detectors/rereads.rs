@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, result_chars,
+    CodexCalls, EST_NOTE, est_tokens, codex_call, codex_call_line, codex_output, input_str, name_of, result_chars,
     tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
@@ -133,6 +133,7 @@ impl Detector for Rereads {
                 "reads",
                 "rereads",
                 "reread_chars",
+                "reread_tokens_est",
                 "rereads_per_compaction",
                 "reread_share",
             ],
@@ -146,6 +147,7 @@ impl Detector for Rereads {
                 json!(c.reads),
                 json!(c.rereads),
                 json!(c.reread_chars),
+                json!(est_tokens(c.reread_chars)),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -167,6 +169,7 @@ impl Detector for Rereads {
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id or whose output never came.".to_owned(),
+                EST_NOTE.to_owned(),
             ],
         }
     }

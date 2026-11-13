@@ -86,7 +86,7 @@ By hook name and command, most cancellations first
 
 | Command | Agents | Reports |
 |---|---|---|
-| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions |
+| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
 | `pipes` | Claude, Codex | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
 | `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose last result was an error and the characters polls returned |
@@ -103,6 +103,8 @@ By hook name and command, most cancellations first
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
 
+Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total.
+
 Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 
 ## Privacy
@@ -113,7 +115,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. It cannot read compressed Codex transcripts (`*.jsonl.zst`), so it counts them under each folder as compressed files skipped. It reads Codex transcripts for `pipes`, `polls` and `rereads` only. A Codex call runs code that can start several commands, so their results count only when the call printed one result per command. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
+Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. It reads compressed Codex transcripts (`*.jsonl.zst`) as it goes. One that does not start with the zstd magic number counts as a compressed file skipped; one whose frame header cannot be read, that fails part way, has a bad checksum or holds more than one zstd frame counts as unreadable, and the records read before the failure still count. It reads Codex transcripts for `pipes`, `polls` and `rereads` only. A Codex call runs code that can start several commands, so their results count only when the call printed one result per command. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
 
 For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). [CodeBurn](https://github.com/getagentseal/codeburn) 0.9.28 `optimize`, [caveman](https://github.com/JuliusBrussee/caveman) 4.1.0 `learn` and [Claude Code](https://github.com/anthropics/claude-code) 2.1.323 `/usage` report priced setup waste. According to their documentation as read on 13 November 2026 ([optimize](https://github.com/getagentseal/codeburn/blob/main/docs/optimize.md), [learn](https://github.com/JuliusBrussee/caveman/blob/main/docs/technical/learn.md), [costs](https://code.claude.com/docs/en/costs)), none reports test failures hidden by a pipe, hook durations and cancellations, or polls split from reruns after an edit.
 

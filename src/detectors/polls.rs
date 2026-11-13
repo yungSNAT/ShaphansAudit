@@ -6,7 +6,7 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, chars, codex_call, codex_call_line, codex_key, codex_output, input_str, name_of,
+    CodexCalls, chars, codex_call, codex_call_line, codex_key, codex_output, EST_NOTE, est_tokens, input_str, name_of,
     result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
@@ -27,19 +27,21 @@ struct Counts {
 
 impl Counts {
     /// The columns every row shares, after those that key it.
-    const COLUMNS: [&'static str; 4] = [
+    const COLUMNS: [&'static str; 5] = [
         "polls",
         "polls_after_failure",
         "poll_chars",
+        "poll_tokens_est",
         "reruns_after_edit",
     ];
 
     /// The cells under `COLUMNS`.
-    fn cells(&self) -> [Value; 4] {
+    fn cells(&self) -> [Value; 5] {
         [
             json!(self.polls),
             json!(self.polls_after_failure),
             json!(self.poll_chars),
+            json!(est_tokens(self.poll_chars)),
             json!(self.reruns_after_edit),
         ]
     }
@@ -161,6 +163,7 @@ impl Detector for Polls {
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
                 "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is, unless a run since has a result that cannot be read; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, its output never came or it did not print one result per command.".to_owned(),
+                EST_NOTE.to_owned(),
             ],
         }
     }

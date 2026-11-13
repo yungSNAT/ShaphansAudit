@@ -108,6 +108,18 @@ pub fn chars(s: &str) -> u64 {
     s.chars().count() as u64
 }
 
+/// About how many tokens `chars` characters make, for the `*_tokens_est` columns.
+///
+/// shortcut: 4 characters a token, a rough average for English text and code; the
+/// model's tokenizer would give the true count, but it is not published.
+#[must_use]
+pub fn est_tokens(chars: u64) -> u64 {
+    chars.div_ceil(4)
+}
+
+/// The note of each section with `*_tokens_est` columns.
+pub const EST_NOTE: &str = "Token estimates (tokens est) divide each row's characters by 4, rounded up, so rows need not add up to a total; the model's own count differs.";
+
 /// The size of a tool result: the characters of text in its content, which is a
 /// string or a list of blocks. A block without text, such as an image, adds nothing.
 #[must_use]
