@@ -57,6 +57,17 @@ shaphan <all|startup|schemas|pipes|polls|rereads|hooks> [--since 7d|24h|YYYY-MM-
 
 `--since` defaults to `7d`; a bare date means local midnight. `--limit` (default 20) caps each table's rows. `--json` prints one object with `schema_version` 1. Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 
+## Codex results
+
+On one machine's rollouts (74,259 `exec` cells, 14 November 2026), the results `shaphan` paired were compared with the `CommandExecution` items that Codex writes in `event_msg` `item_completed` records as each command ends, with its arguments, exit code and output:
+
+- Of the 38,022 paired commands whose item could be found, 38,010 had the item's exit code. 5 of the other 12 were another command's result, in 3 cells that ran their commands through `Promise.all` and printed each result as it came, out of the commands' order. All 14,939 results printed inside lists and objects agreed.
+- Of the 19,794 cells that printed no results or a different number from their commands, 8,639 had one item for each command.
+
+`shaphan` does not follow values through a cell's code to pair them: that needs a JavaScript interpreter, and it would still guess wherever a value depends on what ran. The items are the better upgrade, but they carry no call id: an item can be tied to a cell only whilst that cell is the only one open (88% of items), and to a command only by its text. That is left for a later version.
+
+`pipes` counts cells, not commands, under `codex_outputs_not_paired`. The unguarded test runs whose results were not judged are `unguarded` minus `unguarded_results_found`, for either agent, so a count of commands would repeat it.
+
 ## Not in v0.1
 
 Large tool results, cache rewrites after idle gaps, colour codes in tool results, Codex startup and tool schemas, Hermes `state.db` and RTK `history.db`.
