@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens, input_str,
+    ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens, input_str,
     name_of, result_chars, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
@@ -27,9 +27,9 @@ pub struct Rereads {
     before: HashSet<String>,
     current: HashSet<String>,
     compacted_in_window: bool,
-    /// Claude `tool_use` ids of calls that re-read and whose result has not been read
-    /// yet.
-    awaited: HashSet<String>,
+    /// Claude calls that re-read and whose result has not been read yet, by
+    /// `tool_use` id.
+    claude: ClaudeCalls<()>,
     /// Codex `exec` calls that re-read and whose output has not been read yet.
     codex: CodexCalls<()>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
@@ -46,7 +46,7 @@ impl Detector for Rereads {
             Agent::Claude => {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
-                    || (!self.awaited.is_empty() && line.contains("\"tool_result\""))
+                    || self.claude.wants(line)
             }
             Agent::Codex => {
                 line.contains("\"type\":\"compacted\"")
@@ -60,7 +60,7 @@ impl Detector for Rereads {
         self.before.clear();
         self.current.clear();
         self.compacted_in_window = false;
-        self.awaited.clear();
+        self.claude.clear();
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -78,17 +78,19 @@ impl Detector for Rereads {
         match s.agent {
             Agent::Claude => {
                 for b in tool_uses(r) {
+                    let id = b.get("id").and_then(Value::as_str);
+                    let fresh = self.claude.note(id);
                     let mut reread = false;
                     for path in claude_read_paths(b) {
                         reread |= self.read(s, &path, r.in_window);
                     }
-                    if reread && let Some(id) = b.get("id").and_then(Value::as_str) {
-                        self.awaited.insert(id.to_owned());
+                    if reread && fresh && let Some(id) = id {
+                        self.claude.wait(id, ());
                     }
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    if self.awaited.remove(id) {
+                    if self.claude.take(id).is_some() {
                         self.returned(s, result_chars(b.get("content").unwrap_or(&Value::Null)));
                     }
                 }
@@ -103,6 +105,8 @@ impl Detector for Rereads {
                     if call.exec {
                         self.codex
                             .call(&call.call_id, reread.then(Vec::new), r.in_window);
+                    } else if reread {
+                        self.codex.not_paired(0, r.in_window);
                     }
                 } else if let Some(out) = codex_output(r)
                     && self.codex.take(&out)
@@ -169,7 +173,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -239,5 +243,38 @@ fn claude_read_paths(b: &Value) -> Vec<String> {
             .collect(),
         "Bash" => read_targets(input_str(b, "command").unwrap_or("")),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::detectors::{claude_tool_result, claude_tool_use, replay};
+
+    #[test]
+    fn a_reused_claude_tool_use_id_pairs_with_neither_read() {
+        let read = |path: &str| json!({"file_path": path});
+        let boundary = json!({"type": "system", "subtype": "compact_boundary"});
+        let lines: Vec<(bool, String)> = [
+            claude_tool_use("a", "Read", &read("/work/y.md")),
+            boundary.to_string(),
+            // The re-read and a block reusing its id: the result may be either's.
+            claude_tool_use("b", "Read", &read("/work/y.md")),
+            claude_tool_use("b", "Bash", &json!({"command": "ls"})),
+            claude_tool_result("b", "12345"),
+        ]
+        .into_iter()
+        .map(|l| (true, l))
+        .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &lines);
+        let c = d.totals[&(Agent::Claude, "main")];
+        assert_eq!((c.rereads, c.reread_chars), (1, 0));
     }
 }

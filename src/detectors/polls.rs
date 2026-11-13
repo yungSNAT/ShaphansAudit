@@ -1,12 +1,12 @@
 //! Commands repeated within a session, with or without a file edit in between.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output, est_tokens, input_str,
+    ClaudeCalls, CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output, est_tokens, input_str,
     name_of, result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
@@ -72,10 +72,8 @@ pub struct Polls {
     edits: u64,
     /// The runs awaited so far, which number each one.
     runs: u64,
-    /// Claude runs by `tool_use` id.
-    awaited: HashMap<String, Awaited>,
-    /// The ids of the session's Claude `tool_use` blocks so far.
-    claude_ids: HashSet<String>,
+    /// Claude runs whose result has not been read yet, by `tool_use` id.
+    claude: ClaudeCalls<Awaited>,
     /// Codex `exec` calls whose output has not been read yet, with each command's run.
     codex: CodexCalls<Option<Awaited>>,
     /// By command, its latest run's awaited result or failure. A command whose latest
@@ -94,9 +92,7 @@ impl Detector for Polls {
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
             Agent::Claude => {
-                line.contains("\"tool_use\"")
-                    || (line.contains("\"tool_result\"")
-                        && self.awaited.keys().any(|id| line.contains(id.as_str())))
+line.contains("\"tool_use\"") || self.claude.wants(line)
             }
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
@@ -105,8 +101,7 @@ impl Detector for Polls {
     fn begin(&mut self, _s: &Session) {
         self.last_seen.clear();
         self.edits = 0;
-        self.awaited.clear();
-        self.claude_ids.clear();
+        self.claude.clear();
         self.latest.clear();
     }
 
@@ -119,19 +114,14 @@ impl Detector for Polls {
             Agent::Claude => {
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
-                    // An id carried by more than one block pairs with neither from
-                    // then on, as their results cannot be told apart.
-                    let fresh = id.is_some_and(|id| self.claude_ids.insert(id.to_owned()));
-                    if !fresh && let Some(id) = id {
-                        self.awaited.remove(id);
-                    }
+                    let fresh = self.claude.note(id);
                     let name = name_of(b);
                     if name == "Bash" {
                         let cmd = input_str(b, "command").unwrap_or("");
                         if let Some(run) = self.observe(s, cmd, r.in_window, fresh)
                             && let Some(id) = id
                         {
-                            self.awaited.insert(id.to_owned(), run);
+                            self.claude.wait(id, run);
                         }
                     } else if CLAUDE_EDIT_TOOLS.contains(&name) {
                         self.edits += 1;
@@ -139,7 +129,7 @@ impl Detector for Polls {
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    if let Some(run) = self.awaited.remove(id) {
+                    if let Some(run) = self.claude.take(id) {
                         let failed = b.get("is_error").and_then(Value::as_bool) == Some(true);
                         self.result(s, run, failed, || {
                             result_chars(b.get("content").unwrap_or(&Value::Null))
@@ -197,7 +187,7 @@ impl Detector for Polls {
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command. Codex commands not paired counts their commands, whose results were not judged.".to_owned(),
+                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or that did not print one result per command. Codex commands not paired counts their commands, whose results were not judged.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -277,6 +267,8 @@ impl Polls {
             if call.exec {
                 let runs = (!runs.is_empty()).then_some(runs);
                 self.codex.call(&call.call_id, runs, r.in_window);
+            } else if !runs.is_empty() {
+                self.codex.not_paired(runs.len(), r.in_window);
             }
         } else if let Some(out) = codex_output(r) {
             for (run, res) in self.codex.pair(&out) {
@@ -321,7 +313,7 @@ mod tests {
         };
         let mut d = Polls::default();
         let run = d.observe(&s, "git status", true, true).expect("a run");
-        d.awaited.insert("toolu_a".to_owned(), run);
+        d.claude.wait("toolu_a", run);
         let result = |id: &str| {
             format!(
                 r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
