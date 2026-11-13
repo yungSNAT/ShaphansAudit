@@ -172,6 +172,7 @@ fn pipes_count_unguarded_test_runs_and_masked_failures() {
         "unguarded_reported_success": 2,
         "showed_a_failure_but_reported_success": 1,
         "showed_no_pass_or_fail_line": 0,
+        "codex_outputs_not_paired": 0,
     });
     assert_eq!(s, &expected);
 }
@@ -281,7 +282,8 @@ fn polls_read_codex_command_results() {
     let doc = codex_results("polls");
     let row = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
     // `git status` exits 128, is polled (5 characters back) and polled again in a cell
-    // that runs 2 commands but prints 1 result, so that result pairs with neither.
+    // that runs 2 commands but prints 1 result, so that result pairs with neither. A
+    // later cell runs 2 test commands and also prints 1 result.
     assert_eq!(
         (
             row["commands"].clone(),
@@ -289,7 +291,11 @@ fn polls_read_codex_command_results() {
             row["polls_after_failure"].clone(),
             row["poll_chars"].clone()
         ),
-        (json!(5), json!(2), json!(1), json!(5))
+        (json!(7), json!(2), json!(1), json!(5))
+    );
+    assert_eq!(
+        doc["detectors"]["polls"]["summary"]["codex_outputs_not_paired"],
+        2
     );
 }
 
@@ -297,9 +303,11 @@ fn polls_read_codex_command_results() {
 fn pipes_read_codex_test_runs_and_their_exit_codes() {
     let doc = codex_results("pipes");
     let pipes = &doc["detectors"]["pipes"];
+    // One test run's cell prints its result; a cell of 2 test runs prints 1 result,
+    // which pairs with neither and is counted as not paired.
     let expected = [
-        ("test_runs", 1),
-        ("unguarded", 1),
+        ("test_runs", 3),
+        ("unguarded", 3),
         ("unguarded_results_found", 1),
         ("unguarded_reported_success", 1),
         ("showed_a_failure_but_reported_success", 1),
@@ -309,10 +317,12 @@ fn pipes_read_codex_test_runs_and_their_exit_codes() {
         assert_eq!(pipes["summary"][key], n, "{key}");
         assert_eq!(codex[key], n, "{key}");
     }
+    assert_eq!(pipes["summary"]["codex_outputs_not_paired"], 1);
 }
 
 #[test]
 fn rereads_count_codex_output_characters() {
+    // The re-read's output is a plain string, not a list of text items.
     let doc = codex_results("rereads");
     let row = find(rows(&doc, "rereads", 0), &[("scope", json!("main"))]);
     assert_eq!(

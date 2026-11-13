@@ -99,7 +99,7 @@ impl Detector for Rereads {
                     for path in from_commands.chain(call.reads.iter().cloned()) {
                         reread |= self.read(s, &path, r.in_window);
                     }
-                    if reread && !call.call_id.is_empty() {
+                    if reread && call.exec && !call.call_id.is_empty() {
                         self.awaited.insert(call.call_id);
                     }
                 } else if let Some(out) = codex_output(r) {

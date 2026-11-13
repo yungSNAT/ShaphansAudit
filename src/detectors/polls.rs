@@ -59,8 +59,11 @@ pub struct Polls {
     edits: u64,
     /// Runs by Claude `tool_use` id or by `codex_key`.
     awaited: HashMap<String, Awaited>,
-    /// Codex calls whose output has not been read yet, with how many commands each ran.
-    codex_calls: HashMap<String, usize>,
+    /// Codex `exec` calls whose output has not been read yet: how many commands each
+    /// ran, and whether it was in the window.
+    codex_calls: HashMap<String, (usize, bool)>,
+    /// Codex outputs in the window whose results could not be paired with commands.
+    codex_unpaired: u64,
     /// Commands whose last result read reported an error.
     failed: HashSet<String>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
@@ -110,8 +113,9 @@ impl Detector for Polls {
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                     let failed = b.get("is_error").and_then(Value::as_bool) == Some(true);
-                    let size = result_chars(b.get("content").unwrap_or(&Value::Null));
-                    self.result(s, id, size, failed);
+                    self.result(s, id, failed, || {
+                        result_chars(b.get("content").unwrap_or(&Value::Null))
+                    });
                 }
             }
             Agent::Codex => self.codex(s, r),
@@ -150,12 +154,15 @@ impl Detector for Polls {
         Section {
             name: "polls",
             title: "commands repeated exactly within a session",
-            summary: Vec::new(),
+            summary: vec![(
+                "codex_outputs_not_paired".to_owned(),
+                json!(self.codex_unpaired),
+            )],
             tables: vec![totals, table],
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code.".to_owned(),
+                "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired.".to_owned(),
             ],
         }
     }
@@ -220,17 +227,22 @@ impl Polls {
                     Step::Edit => self.edits += 1,
                 }
             }
-            if !call.call_id.is_empty() {
-                self.codex_calls.insert(call.call_id, index);
+            if call.exec && index > 0 && !call.call_id.is_empty() {
+                self.codex_calls.insert(call.call_id, (index, r.in_window));
             }
         } else if let Some(out) = codex_output(r)
-            && let Some(commands) = self.codex_calls.remove(&out.call_id)
+            && let Some((commands, in_window)) = self.codex_calls.remove(&out.call_id)
         {
             let results = paired(&out, commands);
+            if results.is_empty() && in_window {
+                self.codex_unpaired += 1;
+            }
             for index in 0..commands {
                 let key = codex_key(&out.call_id, index);
                 match results.get(index) {
-                    Some(res) => self.result(s, &key, chars(&res.output), res.exit_code != 0),
+                    Some(res) => {
+                        self.result(s, &key, res.exit_code != 0, || chars(&res.output));
+                    }
                     None => {
                         self.awaited.remove(&key);
                     }
@@ -241,11 +253,12 @@ impl Polls {
 
     /// Reads the result of an awaited run: its size when the run was a counted poll,
     /// and whether it failed, for the next run of the same command.
-    fn result(&mut self, s: &Session, id: &str, n: u64, failed: bool) {
+    fn result(&mut self, s: &Session, id: &str, failed: bool, size: impl FnOnce() -> u64) {
         let Some(run) = self.awaited.remove(id) else {
             return;
         };
         if let Some(class) = run.poll {
+            let n = size();
             self.totals
                 .entry((s.agent, s.scope()))
                 .or_default()

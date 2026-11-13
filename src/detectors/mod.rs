@@ -133,6 +133,8 @@ pub fn json_chars(v: &Value) -> u64 {
 pub struct CodexCall {
     /// The id its output will carry, or "" when it has none.
     pub call_id: String,
+    /// True for an `exec` cell, whose output `codex_output` reads.
+    pub exec: bool,
     pub steps: Vec<Step>,
     pub reads: Vec<String>,
 }
@@ -170,6 +172,7 @@ pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {
             let input = p.get("input")?.as_str()?;
             Some(CodexCall {
                 call_id,
+                exec: true,
                 steps: shell::codex_steps(input),
                 reads: shell::codex_read_calls(input),
             })
@@ -215,8 +218,9 @@ pub fn codex_output_line(line: &str) -> bool {
     line.contains("\"custom_tool_call_output\"")
 }
 
-/// Reads a Codex `exec` cell's output: a list of text items, of which those that are
-/// JSON objects with an `exit_code` and an `output` are `exec_command` results.
+/// Reads a Codex `exec` cell's output: a list of text items or one string, of which
+/// the texts that are JSON objects with an `exit_code` and an `output` are
+/// `exec_command` results. Any other `output` holds no text.
 ///
 /// shortcut: results are found only where the cell prints a result object whole, as
 /// `text(await tools.exec_command(...))` does; a cell that prints parts of one, or
@@ -231,12 +235,14 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
     if p.get("type")?.as_str()? != "custom_tool_call_output" {
         return None;
     }
-    let texts: Vec<&str> = p
-        .get("output")?
-        .as_array()?
-        .iter()
-        .filter_map(|b| b.get("text").and_then(Value::as_str))
-        .collect();
+    let texts: Vec<&str> = match p.get("output") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => Vec::new(),
+    };
     Some(CodexOutput {
         call_id: p.get("call_id")?.as_str()?.to_owned(),
         chars: texts.iter().map(|t| chars(t)).sum(),
