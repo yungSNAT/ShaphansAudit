@@ -70,14 +70,16 @@ fn in_window(lines: &[String]) -> Vec<(bool, String)> {
     lines.iter().map(|l| (true, l.clone())).collect()
 }
 
+/// Report options that keep every row.
+const OPTS: Opts = Opts {
+    limit: 100,
+    paths: false,
+    home: None,
+};
+
 /// A section's summary value under `key`, or null.
 fn summary(d: &dyn Detector, key: &str) -> Value {
-    let opts = Opts {
-        limit: 100,
-        paths: false,
-        home: None,
-    };
-    d.section(&opts)
+    d.section(&OPTS)
         .summary
         .into_iter()
         .find(|(k, _)| k == key)
@@ -86,12 +88,7 @@ fn summary(d: &dyn Detector, key: &str) -> Value {
 
 /// The values under `columns` in the first row of a section's first table.
 fn first_row(d: &dyn Detector, columns: &[&str]) -> Vec<Value> {
-    let opts = Opts {
-        limit: 100,
-        paths: false,
-        home: None,
-    };
-    let table = d.section(&opts).tables.swap_remove(0);
+    let table = d.section(&OPTS).tables.swap_remove(0);
     let row = table.rows.first().expect("a row");
     columns
         .iter()
