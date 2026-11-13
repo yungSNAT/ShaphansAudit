@@ -242,6 +242,7 @@ fn pipes_count_unguarded_test_runs_and_masked_failures() {
         "unguarded_reported_success": 2,
         "showed_a_failure_but_reported_success": 1,
         "showed_no_pass_or_fail_line": 0,
+        "codex_outputs_not_paired": 0,
     });
     assert_eq!(s, &expected);
 }
@@ -321,17 +322,134 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         let row = find(verbs, &[("agent", json!("claude")), ("verb", json!(verb))]);
         assert_eq!(cost(row), expected, "{verb}");
     }
-    let codex: Vec<&Value> = totals
-        .iter()
-        .chain(verbs)
-        .filter(|row| row["agent"] == "codex")
-        .collect();
-    assert!(!codex.is_empty());
-    for row in codex {
-        for column in ["polls_after_failure", "poll_chars", "poll_tokens_est"] {
-            assert_eq!(row.get(column), Some(&Value::Null), "{column} in {row}");
-        }
+    // The Codex fixture's one output is not an `exec_command` result, so it adds none.
+    let codex = find(
+        totals,
+        &[("agent", json!("codex")), ("scope", json!("main"))],
+    );
+    assert_eq!(cost(codex), (json!(0), json!(0), json!(0)));
+}
+
+const CODEX_RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-results");
+
+/// A detector's report over the Codex results fixture.
+fn codex_results(cmd: &str) -> Value {
+    let (code, stdout, stderr) = run(&[
+        cmd,
+        "--codex-root",
+        CODEX_RESULTS,
+        "--agent",
+        "codex",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn polls_read_codex_command_results() {
+    let doc = codex_results("polls");
+    let row = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
+    // `git status` exits 128, is polled (5 characters back) and polled again in a cell
+    // that runs 2 commands but prints 1 result, so that result pairs with neither. A
+    // later cell runs 2 test commands and also prints 1 result.
+    assert_eq!(
+        (
+            row["commands"].clone(),
+            row["polls"].clone(),
+            row["polls_after_failure"].clone(),
+            row["poll_chars"].clone()
+        ),
+        (json!(7), json!(2), json!(1), json!(5))
+    );
+    assert_eq!(
+        doc["detectors"]["polls"]["summary"]["codex_outputs_not_paired"],
+        2
+    );
+}
+
+#[test]
+fn pipes_read_codex_test_runs_and_their_exit_codes() {
+    let doc = codex_results("pipes");
+    let pipes = &doc["detectors"]["pipes"];
+    // One test run's cell prints its result; a cell of 2 test runs prints 1 result,
+    // which pairs with neither and is counted as not paired.
+    let expected = [
+        ("test_runs", 3),
+        ("unguarded", 3),
+        ("unguarded_results_found", 1),
+        ("unguarded_reported_success", 1),
+        ("showed_a_failure_but_reported_success", 1),
+    ];
+    let codex = find(rows(&doc, "pipes", 0), &[("agent", json!("codex"))]);
+    for (key, n) in expected {
+        assert_eq!(pipes["summary"][key], n, "{key}");
+        assert_eq!(codex[key], n, "{key}");
     }
+    assert_eq!(pipes["summary"]["codex_outputs_not_paired"], 1);
+}
+
+#[test]
+fn rereads_count_codex_output_characters() {
+    // The re-read's output is a plain string, not a list of text items.
+    let doc = codex_results("rereads");
+    let row = find(rows(&doc, "rereads", 0), &[("scope", json!("main"))]);
+    assert_eq!(
+        (
+            row["reads"].clone(),
+            row["rereads"].clone(),
+            row["reread_chars"].clone()
+        ),
+        (json!(2), json!(1), json!(5))
+    );
+}
+
+#[test]
+fn codex_record_shapes_are_counted_or_reported_as_not_paired() {
+    // The key sets, item types and result shapes of real Codex rollouts, with
+    // synthetic values: null outputs, string outputs, images, missing call ids, a
+    // cell that prints only an exit code, and runs before and in the window.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-shapes");
+    let (code, stdout, stderr) = run(&[
+        "all",
+        "--codex-root",
+        root,
+        "--agent",
+        "codex",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let not_paired = |d: &str| doc["detectors"][d]["summary"]["codex_outputs_not_paired"].clone();
+
+    let polls = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
+    let keys = ["commands", "polls", "polls_after_failure", "poll_chars"];
+    let got: Vec<Value> = keys.iter().map(|k| polls[*k].clone()).collect();
+    assert_eq!(got, [json!(9), json!(6), json!(1), json!(40)]);
+    assert_eq!(not_paired("polls"), 3);
+
+    let pipes = &doc["detectors"]["pipes"]["summary"];
+    for (key, n) in [
+        ("test_runs", 3),
+        ("unguarded", 3),
+        ("unguarded_results_found", 1),
+        ("showed_a_failure_but_reported_success", 1),
+    ] {
+        assert_eq!(pipes[key], n, "{key}");
+    }
+    assert_eq!(not_paired("pipes"), 2);
+
+    let rereads = find(rows(&doc, "rereads", 0), &[("scope", json!("main"))]);
+    assert_eq!(
+        (rereads["rereads"].clone(), rereads["reread_chars"].clone()),
+        (json!(1), json!(55))
+    );
+    assert_eq!(not_paired("rereads"), 0);
 }
 
 const RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/results/claude");
@@ -407,8 +525,9 @@ fn rereads_count_files_read_again_after_compaction() {
         (codex["reads"].clone(), codex["rereads"].clone()),
         (json!(3), json!(1))
     );
-    assert_eq!(codex.get("reread_chars"), Some(&Value::Null));
-    assert_eq!(codex.get("reread_tokens_est"), Some(&Value::Null));
+    // Its re-read's call id has no output after it.
+    assert_eq!(codex["reread_chars"], 0);
+    assert_eq!(codex["reread_tokens_est"], 0);
     let paths = rows(&doc, "rereads", 1);
     let names: Vec<&str> = paths
         .iter()
@@ -685,6 +804,7 @@ fn assert_no_sentinel(claude: &str, codex: &str) {
 fn output_never_contains_transcript_content() {
     assert_no_sentinel(CLAUDE, CODEX);
     assert_no_sentinel(RESULTS, CODEX);
+    assert_no_sentinel(RESULTS, CODEX_RESULTS);
     assert_no_sentinel(KINDS, CODEX);
 }
 
@@ -833,8 +953,8 @@ fn text_output_has_a_section_per_detector() {
 
 #[test]
 fn a_detector_without_its_agent_says_so() {
-    let doc = report("pipes", &["--agent", "codex"]);
-    let notes = doc["detectors"]["pipes"]["notes"]
+    let doc = report("hooks", &["--agent", "codex"]);
+    let notes = doc["detectors"]["hooks"]["notes"]
         .as_array()
         .expect("notes");
     assert_eq!(

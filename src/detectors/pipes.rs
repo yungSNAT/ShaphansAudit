@@ -1,11 +1,15 @@
-//! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash).
+//! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash and
+//! Codex commands).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Value, json};
 
-use super::{input_str, name_of, text_of, tool_results, tool_uses};
-use crate::report::{Opts, Section};
+use super::{
+    CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, text_of,
+    tool_results, tool_uses,
+};
+use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
 use crate::shell::{pipe_check, shows_failure, shows_pass};
 
@@ -22,73 +26,117 @@ struct Counts {
     no_pass_or_fail_shown: u64,
 }
 
+impl Counts {
+    fn fields(&self) -> [(&'static str, u64); 9] {
+        [
+            ("test_runs", self.test_runs),
+            ("piped_into_tail_or_head", self.piped),
+            ("over_ssh_not_judged", self.remote),
+            ("guarded_with_pipefail_or_pipestatus", self.guarded),
+            ("unguarded", self.unguarded),
+            ("unguarded_results_found", self.results),
+            ("unguarded_reported_success", self.reported_success),
+            (
+                "showed_a_failure_but_reported_success",
+                self.failure_shown_success_reported,
+            ),
+            ("showed_no_pass_or_fail_line", self.no_pass_or_fail_shown),
+        ]
+    }
+}
+
 /// Counts of test runs piped into `tail` or `head`.
 #[derive(Default)]
 pub struct Pipes {
+    /// Unguarded Claude runs by `tool_use` id.
     pending: HashSet<String>,
+    /// Codex `exec` calls with an unguarded test run whose output has not been read,
+    /// with whether each command is one.
+    codex: CodexCalls<bool>,
     n: Counts,
+    by_agent: BTreeMap<Agent, Counts>,
 }
 
 impl Detector for Pipes {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude]
+        &[Agent::Claude, Agent::Codex]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"Bash\"") || (!self.pending.is_empty() && line.contains("\"tool_result\""))
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        match s.agent {
+            Agent::Claude => {
+                line.contains("\"Bash\"")
+                    || (!self.pending.is_empty() && line.contains("\"tool_result\""))
+            }
+            Agent::Codex => codex_call_line(line) || self.codex.wants(line),
+        }
     }
 
     fn begin(&mut self, _s: &Session) {
         self.pending.clear();
     }
 
-    fn record(&mut self, _s: &Session, r: &Record<'_>) {
-        for b in tool_uses(r).filter(|b| name_of(b) == "Bash") {
-            if r.in_window {
-                self.command(b);
+    fn end(&mut self, _s: &Session) {
+        self.codex.end();
+    }
+
+    fn record(&mut self, s: &Session, r: &Record<'_>) {
+        match s.agent {
+            Agent::Claude => {
+                for b in tool_uses(r).filter(|b| name_of(b) == "Bash") {
+                    let id = b.get("id").and_then(Value::as_str).unwrap_or("");
+                    if r.in_window
+                        && self.command(s.agent, input_str(b, "command").unwrap_or(""))
+                        && !id.is_empty()
+                    {
+                        self.pending.insert(id.to_owned());
+                    }
+                }
+                for b in tool_results(r) {
+                    let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                    if self.pending.remove(id) {
+                        let text = text_of(b.get("content").unwrap_or(&Value::Null));
+                        let success = b.get("is_error").and_then(Value::as_bool) != Some(true);
+                        self.result(s.agent, &text, success);
+                    }
+                }
             }
-        }
-        for b in tool_results(r) {
-            let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-            if self.pending.remove(id) {
-                self.result(b);
-            }
+            Agent::Codex => self.codex(s, r),
         }
     }
 
-    fn section(&self, _opts: &Opts) -> Section {
-        let n = self.n;
+    fn section(&self, opts: &Opts) -> Section {
+        let fields = self.n.fields();
+        let mut table = Table::new(
+            "By agent",
+            std::iter::once("agent")
+                .chain(fields.iter().map(|(k, _)| *k))
+                .collect(),
+        );
+        for (agent, c) in &self.by_agent {
+            let mut row = vec![json!(agent.name())];
+            row.extend(c.fields().iter().map(|(_, v)| json!(v)));
+            table.rows.push(row);
+        }
+        table.truncate(opts.limit);
         Section {
             name: "pipes",
-            title: "test runs piped into tail or head (Claude Bash)",
-            summary: vec![
-                ("test_runs".to_owned(), json!(n.test_runs)),
-                ("piped_into_tail_or_head".to_owned(), json!(n.piped)),
-                ("over_ssh_not_judged".to_owned(), json!(n.remote)),
-                (
-                    "guarded_with_pipefail_or_pipestatus".to_owned(),
-                    json!(n.guarded),
-                ),
-                ("unguarded".to_owned(), json!(n.unguarded)),
-                ("unguarded_results_found".to_owned(), json!(n.results)),
-                (
-                    "unguarded_reported_success".to_owned(),
-                    json!(n.reported_success),
-                ),
-                (
-                    "showed_a_failure_but_reported_success".to_owned(),
-                    json!(n.failure_shown_success_reported),
-                ),
-                (
-                    "showed_no_pass_or_fail_line".to_owned(),
-                    json!(n.no_pass_or_fail_shown),
-                ),
-            ],
-            tables: Vec::new(),
+            title: "test runs piped into tail or head (Claude Bash, Codex commands)",
+            summary: fields
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), json!(v)))
+                .chain(std::iter::once((
+                    "codex_outputs_not_paired".to_owned(),
+                    json!(self.codex.unpaired),
+                )))
+                .collect(),
+            tables: vec![table],
             notes: vec![
                 "An unguarded pipe reports tail's or head's exit status, not the test runner's."
                     .to_owned(),
                 "Fix: set -o pipefail before the pipe, or keep the runner's own exit status."
+                    .to_owned(),
+                "A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
                     .to_owned(),
             ],
         }
@@ -96,41 +144,70 @@ impl Detector for Pipes {
 }
 
 impl Pipes {
-    fn command(&mut self, b: &Value) {
-        let check = pipe_check(input_str(b, "command").unwrap_or(""));
+    /// Adds to the totals and to `agent`'s row.
+    fn add(&mut self, agent: Agent, f: impl Fn(&mut Counts)) {
+        f(&mut self.n);
+        f(self.by_agent.entry(agent).or_default());
+    }
+
+    /// Judges one command and says whether it is an unguarded test run.
+    fn command(&mut self, agent: Agent, cmd: &str) -> bool {
+        let check = pipe_check(cmd);
         if !check.runner {
-            return;
+            return false;
         }
-        self.n.test_runs += 1;
+        self.add(agent, |c| c.test_runs += 1);
         if !check.piped {
-            return;
+            return false;
         }
-        self.n.piped += 1;
+        self.add(agent, |c| c.piped += 1);
         if check.remote {
-            self.n.remote += 1;
+            self.add(agent, |c| c.remote += 1);
         } else if check.guarded {
-            self.n.guarded += 1;
+            self.add(agent, |c| c.guarded += 1);
         } else {
-            self.n.unguarded += 1;
-            if let Some(id) = b.get("id").and_then(Value::as_str) {
-                self.pending.insert(id.to_owned());
+            self.add(agent, |c| c.unguarded += 1);
+            return true;
+        }
+        false
+    }
+
+    /// Reads a Codex call's commands, or the results of its unguarded test runs.
+    fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        if let Some(call) = codex_call(r) {
+            let unguarded: Vec<bool> = if r.in_window {
+                call.commands().map(|c| self.command(s.agent, c)).collect()
+            } else {
+                Vec::new()
+            };
+            if call.exec {
+                let runs = unguarded.contains(&true).then_some(unguarded);
+                self.codex.call(&call.call_id, runs, r.in_window);
+            }
+        } else if let Some(out) = codex_output(r) {
+            for (unguarded, res) in self.codex.pair(&out) {
+                if unguarded {
+                    self.result(s.agent, &res.output, res.exit_code == 0);
+                }
             }
         }
     }
 
-    fn result(&mut self, b: &Value) {
-        let text = text_of(b.get("content").unwrap_or(&Value::Null));
-        let success = b.get("is_error").and_then(Value::as_bool) != Some(true);
-        self.n.results += 1;
-        if success {
-            self.n.reported_success += 1;
-        }
-        if shows_failure(&text) {
+    fn result(&mut self, agent: Agent, text: &str, success: bool) {
+        let failure = shows_failure(text);
+        let pass = shows_pass(text);
+        self.add(agent, |c| {
+            c.results += 1;
             if success {
-                self.n.failure_shown_success_reported += 1;
+                c.reported_success += 1;
             }
-        } else if !shows_pass(&text) {
-            self.n.no_pass_or_fail_shown += 1;
-        }
+            if failure {
+                if success {
+                    c.failure_shown_success_reported += 1;
+                }
+            } else if !pass {
+                c.no_pass_or_fail_shown += 1;
+            }
+        });
     }
 }

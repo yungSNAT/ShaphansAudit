@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    EST_NOTE, codex_call, codex_call_line, est_tokens, from_results, input_str, name_of,
-    result_chars, tool_results, tool_uses,
+    CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens, input_str,
+    name_of, result_chars, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -27,8 +27,11 @@ pub struct Rereads {
     before: HashSet<String>,
     current: HashSet<String>,
     compacted_in_window: bool,
-    /// Claude `tool_use` ids of calls that re-read and whose result has not been read yet.
+    /// Claude `tool_use` ids of calls that re-read and whose result has not been read
+    /// yet.
     awaited: HashSet<String>,
+    /// Codex `exec` calls that re-read and whose output has not been read yet.
+    codex: CodexCalls<()>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
 }
@@ -45,7 +48,11 @@ impl Detector for Rereads {
                     || line.contains("\"tool_use\"")
                     || (!self.awaited.is_empty() && line.contains("\"tool_result\""))
             }
-            Agent::Codex => line.contains("\"type\":\"compacted\"") || codex_call_line(line),
+            Agent::Codex => {
+                line.contains("\"type\":\"compacted\"")
+                    || codex_call_line(line)
+                    || self.codex.wants(line)
+            }
         }
     }
 
@@ -82,25 +89,32 @@ impl Detector for Rereads {
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                     if self.awaited.remove(id) {
-                        self.totals
-                            .entry((s.agent, s.scope()))
-                            .or_default()
-                            .reread_chars += result_chars(b.get("content").unwrap_or(&Value::Null));
+                        self.returned(s, result_chars(b.get("content").unwrap_or(&Value::Null)));
                     }
                 }
             }
             Agent::Codex => {
                 if let Some(call) = codex_call(r) {
                     let from_commands = call.commands().flat_map(read_targets);
+                    let mut reread = false;
                     for path in from_commands.chain(call.reads.iter().cloned()) {
-                        self.read(s, &path, r.in_window);
+                        reread |= self.read(s, &path, r.in_window);
                     }
+                    if call.exec {
+                        self.codex
+                            .call(&call.call_id, reread.then(Vec::new), r.in_window);
+                    }
+                } else if let Some(out) = codex_output(r)
+                    && self.codex.take(&out)
+                {
+                    self.returned(s, out.chars);
                 }
             }
         }
     }
 
     fn end(&mut self, s: &Session) {
+        self.codex.end();
         if self.compacted_in_window {
             self.totals
                 .entry((s.agent, s.scope()))
@@ -133,8 +147,8 @@ impl Detector for Rereads {
                 json!(c.compactions),
                 json!(c.reads),
                 json!(c.rereads),
-                from_results(*agent, c.reread_chars),
-                from_results(*agent, est_tokens(c.reread_chars)),
+                json!(c.reread_chars),
+                json!(est_tokens(c.reread_chars)),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -147,12 +161,15 @@ impl Detector for Rereads {
         Section {
             name: "rereads",
             title: "files read again after a context compaction",
-            summary: Vec::new(),
+            summary: vec![(
+                "codex_outputs_not_paired".to_owned(),
+                json!(self.codex.unpaired),
+            )],
             tables,
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. They are read for Claude only.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -170,6 +187,14 @@ impl Rereads {
         }
         let current = std::mem::take(&mut self.current);
         self.before.extend(current);
+    }
+
+    /// Adds the size of the result of a call that re-read.
+    fn returned(&mut self, s: &Session, size: u64) {
+        self.totals
+            .entry((s.agent, s.scope()))
+            .or_default()
+            .reread_chars += size;
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.

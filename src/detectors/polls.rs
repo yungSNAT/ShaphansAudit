@@ -1,13 +1,13 @@
 //! Commands repeated within a session, with or without a file edit in between.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use serde_json::{Value, json};
 
 use super::{
-    EST_NOTE, codex_call, codex_call_line, est_tokens, from_results, input_str, name_of,
-    result_chars, tool_results, tool_uses,
+    CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output, est_tokens, input_str,
+    name_of, result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -36,22 +36,33 @@ impl Counts {
     ];
 
     /// The cells under `COLUMNS`.
-    fn cells(&self, agent: Agent) -> [Value; 5] {
+    fn cells(&self) -> [Value; 5] {
         [
             json!(self.polls),
-            from_results(agent, self.polls_after_failure),
-            from_results(agent, self.poll_chars),
-            from_results(agent, est_tokens(self.poll_chars)),
+            json!(self.polls_after_failure),
+            json!(self.poll_chars),
+            json!(est_tokens(self.poll_chars)),
             json!(self.reruns_after_edit),
         ]
     }
 }
 
-/// A Claude Bash run whose result has not been read yet.
+/// A run whose result has not been read yet.
 struct Awaited {
     command: String,
     /// The verb class, when the run is a poll counted in the window.
     poll: Option<String>,
+    /// The run's number in the scan.
+    run: u64,
+}
+
+/// What is known of a command's latest run.
+#[derive(PartialEq, Eq)]
+enum Latest {
+    /// Its result, by run number, is awaited.
+    Awaited(u64),
+    /// Its result was read and reported an error.
+    Failed,
 }
 
 /// Exact repeats of a command, split by whether a file edit came between.
@@ -59,10 +70,15 @@ struct Awaited {
 pub struct Polls {
     last_seen: HashMap<String, u64>,
     edits: u64,
+    /// The runs awaited so far, which number each one.
+    runs: u64,
     /// Claude runs by `tool_use` id.
     awaited: HashMap<String, Awaited>,
-    /// Commands whose last result read reported an error.
-    failed: HashSet<String>,
+    /// Codex `exec` calls whose output has not been read yet, with each command's run.
+    codex: CodexCalls<Option<Awaited>>,
+    /// By command, its latest run's awaited result or failure. A command whose latest
+    /// run succeeded, or whose result will never be read, has no entry.
+    latest: HashMap<String, Latest>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     verbs: BTreeMap<(Agent, String), Counts>,
     programs: Rc<Programs>,
@@ -80,7 +96,7 @@ impl Detector for Polls {
                     || (line.contains("\"tool_result\"")
                         && self.awaited.keys().any(|id| line.contains(id.as_str())))
             }
-            Agent::Codex => codex_call_line(line),
+            Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
 
@@ -88,7 +104,11 @@ impl Detector for Polls {
         self.last_seen.clear();
         self.edits = 0;
         self.awaited.clear();
-        self.failed.clear();
+        self.latest.clear();
+    }
+
+    fn end(&mut self, _s: &Session) {
+        self.codex.end();
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -98,23 +118,27 @@ impl Detector for Polls {
                     let name = name_of(b);
                     if name == "Bash" {
                         let id = b.get("id").and_then(Value::as_str);
-                        self.observe(s, input_str(b, "command").unwrap_or(""), r.in_window, id);
+                        let cmd = input_str(b, "command").unwrap_or("");
+                        if let Some(run) = self.observe(s, cmd, r.in_window, id.is_some())
+                            && let Some(id) = id
+                        {
+                            self.awaited.insert(id.to_owned(), run);
+                        }
                     } else if CLAUDE_EDIT_TOOLS.contains(&name) {
                         self.edits += 1;
                     }
                 }
                 for b in tool_results(r) {
-                    self.result(s, b);
-                }
-            }
-            Agent::Codex => {
-                for step in codex_call(r).map(|c| c.steps).unwrap_or_default() {
-                    match step {
-                        Step::Command(c) => self.observe(s, &c, r.in_window, None),
-                        Step::Edit => self.edits += 1,
+                    let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                    if let Some(run) = self.awaited.remove(id) {
+                        let failed = b.get("is_error").and_then(Value::as_bool) == Some(true);
+                        self.result(s, run, failed, || {
+                            result_chars(b.get("content").unwrap_or(&Value::Null))
+                        });
                     }
                 }
             }
+            Agent::Codex => self.codex(s, r),
         }
     }
 
@@ -126,7 +150,7 @@ impl Detector for Polls {
         );
         for ((agent, scope), c) in &self.totals {
             let mut row = vec![json!(agent.name()), json!(scope), json!(c.commands)];
-            row.extend(c.cells(*agent));
+            row.extend(c.cells());
             totals.rows.push(row);
         }
         totals.truncate(opts.limit);
@@ -136,7 +160,7 @@ impl Detector for Polls {
             .filter(|(_, c)| c.polls + c.reruns_after_edit > 0)
             .map(|((agent, verb), c)| {
                 let mut row = vec![json!(agent.name()), json!(verb)];
-                row.extend(c.cells(*agent));
+                row.extend(c.cells());
                 (c.polls, row)
             })
             .collect();
@@ -150,12 +174,15 @@ impl Detector for Polls {
         Section {
             name: "polls",
             title: "commands repeated exactly within a session",
-            summary: Vec::new(),
+            summary: vec![(
+                "codex_outputs_not_paired".to_owned(),
+                json!(self.codex.unpaired),
+            )],
             tables: vec![totals, table],
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. Both are read for Claude only.".to_owned(),
+                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -170,12 +197,20 @@ impl Polls {
         }
     }
 
-    /// Counts one run of a command. `id` is the Claude `tool_use` id that its result
-    /// will carry.
-    fn observe(&mut self, s: &Session, cmd: &str, in_window: bool, id: Option<&str>) {
+    /// Counts one run of a command and gives the run whose result to await, if
+    /// `awaits`. The run becomes the command's latest, so until its result is read
+    /// the next run does not follow a failure; a run whose result is not awaited
+    /// leaves that unknown.
+    fn observe(
+        &mut self,
+        s: &Session,
+        cmd: &str,
+        in_window: bool,
+        awaits: bool,
+    ) -> Option<Awaited> {
         let key = cmd.trim();
         if key.is_empty() {
-            return;
+            return None;
         }
         let previous = self.last_seen.insert(key.to_owned(), self.edits);
         let mut poll = None;
@@ -188,7 +223,7 @@ impl Polls {
                 if prev_edits == self.edits {
                     total.polls += 1;
                     verb.polls += 1;
-                    if self.failed.contains(key) {
+                    if self.latest.get(key) == Some(&Latest::Failed) {
                         total.polls_after_failure += 1;
                         verb.polls_after_failure += 1;
                     }
@@ -199,32 +234,62 @@ impl Polls {
                 }
             }
         }
-        if let Some(id) = id {
-            let command = key.to_owned();
-            self.awaited
-                .insert(id.to_owned(), Awaited { command, poll });
+        if !awaits {
+            self.latest.remove(key);
+            return None;
+        }
+        self.runs += 1;
+        self.latest
+            .insert(key.to_owned(), Latest::Awaited(self.runs));
+        Some(Awaited {
+            command: key.to_owned(),
+            poll,
+            run: self.runs,
+        })
+    }
+
+    /// Reads a Codex call's commands, or its output.
+    fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        if let Some(call) = codex_call(r) {
+            let awaits = call.exec && !call.call_id.is_empty();
+            let mut runs = Vec::new();
+            for step in call.steps {
+                match step {
+                    Step::Command(c) => runs.push(self.observe(s, &c, r.in_window, awaits)),
+                    Step::Edit => self.edits += 1,
+                }
+            }
+            if call.exec {
+                let runs = (!runs.is_empty()).then_some(runs);
+                self.codex.call(&call.call_id, runs, r.in_window);
+            }
+        } else if let Some(out) = codex_output(r) {
+            for (run, res) in self.codex.pair(&out) {
+                if let Some(run) = run {
+                    self.result(s, run, res.exit_code != 0, || chars(&res.output));
+                }
+            }
         }
     }
 
     /// Reads the result of an awaited run: its size when the run was a counted poll,
-    /// and whether it failed, for the next run of the same command.
-    fn result(&mut self, s: &Session, b: &Value) {
-        let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-        let Some(run) = self.awaited.remove(id) else {
-            return;
-        };
+    /// and, when it is still its command's latest run, whether it failed.
+    fn result(&mut self, s: &Session, run: Awaited, failed: bool, size: impl FnOnce() -> u64) {
         if let Some(class) = run.poll {
-            let n = result_chars(b.get("content").unwrap_or(&Value::Null));
+            let n = size();
             self.totals
                 .entry((s.agent, s.scope()))
                 .or_default()
                 .poll_chars += n;
             self.verbs.entry((s.agent, class)).or_default().poll_chars += n;
         }
-        if b.get("is_error").and_then(Value::as_bool) == Some(true) {
-            self.failed.insert(run.command);
+        if self.latest.get(&run.command) != Some(&Latest::Awaited(run.run)) {
+            return;
+        }
+        if failed {
+            self.latest.insert(run.command, Latest::Failed);
         } else {
-            self.failed.remove(&run.command);
+            self.latest.remove(&run.command);
         }
     }
 }
@@ -240,7 +305,8 @@ mod tests {
             subagent: false,
         };
         let mut d = Polls::default();
-        d.observe(&s, "git status", true, Some("toolu_a"));
+        let run = d.observe(&s, "git status", true, true).expect("a run");
+        d.awaited.insert("toolu_a".to_owned(), run);
         let result = |id: &str| {
             format!(
                 r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
@@ -248,5 +314,42 @@ mod tests {
         };
         assert!(d.wants(&s, &result("toolu_a")));
         assert!(!d.wants(&s, &result("toolu_b")));
+    }
+
+    #[test]
+    fn a_claude_run_whose_result_never_comes_hides_an_earlier_failure() {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let call = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{{"command":"git status"}}}}]}}}}"#
+            )
+        };
+        let failure = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","is_error":true}]}}"#;
+        let mut d = Polls::default();
+        d.begin(&s);
+        for line in [
+            call("toolu_a"),
+            failure.to_owned(),
+            call("toolu_b"),
+            call("toolu_c"),
+        ] {
+            if d.wants(&s, &line) {
+                let value: Value = serde_json::from_str(&line).expect("valid JSON");
+                d.record(
+                    &s,
+                    &Record {
+                        value: &value,
+                        in_window: true,
+                    },
+                );
+            }
+        }
+        d.end(&s);
+        let c = d.totals[&(Agent::Claude, "main")];
+        // b follows the failure; c follows b, whose result never came.
+        assert_eq!((c.polls, c.polls_after_failure), (2, 1));
     }
 }

@@ -7,13 +7,17 @@ pub mod rereads;
 pub mod schemas;
 pub mod startup;
 
+#[cfg(test)]
+mod codex_tests;
+
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use serde_json::Value;
 
 use crate::cli::Command;
 use crate::programs::Programs;
-use crate::scan::{Agent, Detector, Record};
+use crate::scan::{Detector, Record};
 use crate::shell::{self, Step};
 
 /// The detectors a subcommand runs, in report order.
@@ -116,15 +120,6 @@ pub fn est_tokens(chars: u64) -> u64 {
 /// The note of each section with `*_tokens_est` columns.
 pub const EST_NOTE: &str = "Token estimates (tokens est) divide each row's characters by 4, rounded up, so rows need not add up to a total; the model's own count differs.";
 
-/// A count taken from tool results, which are read for Claude only: null for Codex.
-#[must_use]
-pub fn from_results(agent: Agent, n: u64) -> Value {
-    match agent {
-        Agent::Claude => Value::from(n),
-        Agent::Codex => Value::Null,
-    }
-}
-
 /// The size of a tool result: the characters of text in its content, which is a
 /// string or a list of blocks. A block without text, such as an image, adds nothing.
 #[must_use]
@@ -152,6 +147,10 @@ pub fn json_chars(v: &Value) -> u64 {
 /// What one Codex tool call runs and edits, in order, and what it reads.
 #[derive(Debug, Default)]
 pub struct CodexCall {
+    /// The id its output will carry, or "" when it has none.
+    pub call_id: String,
+    /// True for an `exec` cell, whose output `codex_output` reads.
+    pub exec: bool,
     pub steps: Vec<Step>,
     pub reads: Vec<String>,
 }
@@ -179,15 +178,23 @@ pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {
         return None;
     }
     let p = r.value.get("payload")?;
+    let call_id = p
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     match p.get("type")?.as_str()? {
         "custom_tool_call" if name_of(p) == "exec" => {
             let input = p.get("input")?.as_str()?;
             Some(CodexCall {
+                call_id,
+                exec: true,
                 steps: shell::codex_steps(input),
                 reads: shell::codex_read_calls(input),
             })
         }
         "function_call" if name_of(p) == "apply_patch" => Some(CodexCall {
+            call_id,
             steps: vec![Step::Edit],
             ..CodexCall::default()
         }),
@@ -195,11 +202,153 @@ pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {
             let args: Value = serde_json::from_str(p.get("arguments")?.as_str()?).ok()?;
             let cmd = function_command(args.get("cmd").or_else(|| args.get("command"))?)?;
             Some(CodexCall {
+                call_id,
                 steps: vec![Step::Command(cmd)],
                 ..CodexCall::default()
             })
         }
         _ => None,
+    }
+}
+
+/// What a Codex `exec` cell printed.
+#[derive(Debug, Default)]
+pub struct CodexOutput {
+    pub call_id: String,
+    /// Characters of text in the output.
+    pub chars: u64,
+    /// The `exec_command` results it printed, in order.
+    pub results: Vec<CommandResult>,
+}
+
+/// One `exec_command` result as an `exec` cell prints it.
+#[derive(Debug)]
+pub struct CommandResult {
+    pub exit_code: i64,
+    pub output: String,
+}
+
+/// Reads a Codex `exec` cell's output: a list of text items or one string, of which
+/// the texts that are JSON objects with an `exit_code` and an `output` are
+/// `exec_command` results; a null `output` is empty. Any other `output` holds no
+/// text.
+///
+/// shortcut: results are found only where the cell prints a result object whole, as
+/// `text(await tools.exec_command(...))` does; a cell that prints parts of one, or
+/// none, gives no results. Reading the cell's code to follow each value would be the
+/// upgrade.
+#[must_use]
+pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
+    if r.kind() != "response_item" {
+        return None;
+    }
+    let p = r.value.get("payload")?;
+    if p.get("type")?.as_str()? != "custom_tool_call_output" {
+        return None;
+    }
+    let texts: Vec<&str> = match p.get("output") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(CodexOutput {
+        call_id: p.get("call_id")?.as_str()?.to_owned(),
+        chars: texts.iter().map(|t| chars(t)).sum(),
+        results: texts.iter().filter_map(|t| command_result(t)).collect(),
+    })
+}
+
+fn command_result(text: &str) -> Option<CommandResult> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let output = match v.get("output")? {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        _ => return None,
+    };
+    Some(CommandResult {
+        exit_code: v.get("exit_code")?.as_i64()?,
+        output,
+    })
+}
+
+/// Codex `exec` calls whose output a detector awaits, each with what the detector
+/// keeps for each of its commands, and how many in the window could not be paired
+/// with their results: calls without an id, calls whose id another `exec` call in
+/// the session also carries, calls whose output never came, and outputs that did not
+/// print one result per command.
+pub struct CodexCalls<T> {
+    /// The ids of the session's `exec` calls so far.
+    seen: HashSet<String>,
+    /// By call id: what the detector keeps for each command, and whether the call was
+    /// in the window.
+    waiting: HashMap<String, (Vec<T>, bool)>,
+    pub unpaired: u64,
+}
+
+impl<T> Default for CodexCalls<T> {
+    fn default() -> Self {
+        Self {
+            seen: HashSet::new(),
+            waiting: HashMap::new(),
+            unpaired: 0,
+        }
+    }
+}
+
+impl<T> CodexCalls<T> {
+    /// Notes an `exec` call, which every detector reading outputs must do for every
+    /// call so that a reused id is seen. `runs` holds what the detector keeps for
+    /// each command, by position, or is `None` when it awaits none of the output. An
+    /// id carried by more than one call pairs with neither from then on, as their
+    /// outputs cannot be told apart.
+    pub fn call(&mut self, call_id: &str, runs: Option<Vec<T>>, in_window: bool) {
+        let fresh = !call_id.is_empty() && self.seen.insert(call_id.to_owned());
+        if !fresh && let Some((_, earlier)) = self.waiting.remove(call_id) {
+            self.unpaired += u64::from(earlier);
+        }
+        match runs {
+            Some(runs) if fresh => {
+                self.waiting.insert(call_id.to_owned(), (runs, in_window));
+            }
+            Some(_) => self.unpaired += u64::from(in_window),
+            None => {}
+        }
+    }
+
+    /// True for lines that may hold an awaited call's output.
+    #[must_use]
+    pub fn wants(&self, line: &str) -> bool {
+        line.contains("\"custom_tool_call_output\"")
+            && self.waiting.keys().any(|id| line.contains(id.as_str()))
+    }
+
+    /// Whether the output's call was awaited; it is awaited no longer.
+    pub fn take(&mut self, out: &CodexOutput) -> bool {
+        self.waiting.remove(&out.call_id).is_some()
+    }
+
+    /// For an awaited call's output: what the detector kept for each command, with
+    /// that command's result, when the cell printed one result per command. Otherwise
+    /// none, as which result belongs to which command is unknown.
+    pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Vec<(T, &'o CommandResult)> {
+        let Some((runs, in_window)) = self.waiting.remove(&out.call_id) else {
+            return Vec::new();
+        };
+        if runs.len() != out.results.len() {
+            self.unpaired += u64::from(in_window);
+            return Vec::new();
+        }
+        runs.into_iter().zip(&out.results).collect()
+    }
+
+    /// Ends a session: the calls still awaiting output never get it.
+    pub fn end(&mut self) {
+        let in_window = self.waiting.drain().filter(|(_, (_, w))| *w).count();
+        self.unpaired += in_window as u64;
+        self.seen.clear();
     }
 }
 
