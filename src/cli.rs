@@ -52,7 +52,7 @@ pub enum Command {
     Startup,
     /// Tool schemas loaded against tools called (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex)
     Pipes,
     /// Commands repeated with no edit in between (Claude, Codex)
     Polls,

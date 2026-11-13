@@ -1031,6 +1031,17 @@ fn help_and_version_exit_zero() {
 }
 
 #[test]
+fn help_says_pipes_reads_codex_commands_too() {
+    let (code, stdout, _) = run(&["--help"]);
+    assert_eq!(code, 0);
+    let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        help.contains("a pipe into tail or head hides (Claude, Codex)"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn usage_errors_exit_two() {
     assert_eq!(run(&[]).0, 2);
     assert_eq!(run(&["polls", "--no-such-flag"]).0, 2);
