@@ -206,6 +206,59 @@ fn a_result_still_running_or_printed_in_part_is_not_one() {
     assert_eq!(not_paired(&lines), (json!(2), json!(2)));
 }
 
+/// A cell running git status then git diff whose `texts` print git diff's failure
+/// first, then a passing poll of git status: it must not follow a failure.
+fn printed_out_of_order(texts: &[Value]) -> Vec<(bool, String)> {
+    in_window(&[
+        exec("a", &commands(&["git status", "git diff"])),
+        printed("a", texts),
+        exec("b", &commands(&["git status"])),
+        output("b", &[(0, json!("ok"))]),
+    ])
+}
+
+#[test]
+fn entries_numbered_out_of_order_pair_with_neither_command() {
+    let entry = |i: u64, code: i64| json!({"i": i, "status": "fulfilled", "value": result(code, &json!("x"))});
+    for texts in [
+        vec![json!([entry(1, 1), entry(0, 0)])],
+        vec![
+            entry(1, 1),
+            json!({"i": 0, "result": settled(result(0, &json!("x")))}),
+        ],
+    ] {
+        let lines = printed_out_of_order(&texts);
+        assert_eq!(polls(&lines), (counts(1, 0, 2), json!(1)));
+    }
+    // Numbers that rise, with gaps for entries holding no result, keep their order.
+    let lines = in_window(&[
+        exec("a", &commands(&["git status", "git diff"])),
+        printed(
+            "a",
+            &[
+                entry(0, 1),
+                json!({"i": 1, "status": "rejected"}),
+                entry(2, 0),
+            ],
+        ),
+        exec("b", &commands(&["git status"])),
+        output("b", &[(0, json!("ok"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 1, 2), json!(0)));
+}
+
+#[test]
+fn a_cell_that_printed_a_result_still_running_pairs_with_neither_command() {
+    // git status was still running when git diff failed; the last result, which
+    // write_stdin printed when git status ended, is git status's.
+    let running = json!({"chunk_id": "k", "session_id": 3, "output": "x"});
+    let lines = printed_out_of_order(&[
+        json!([running, result(1, &json!("x"))]),
+        result(0, &json!("x")),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 0, 2), json!(1)));
+}
+
 #[test]
 fn commands_not_paired_counts_each_command_of_each_cell_in_the_window() {
     let lines = [
