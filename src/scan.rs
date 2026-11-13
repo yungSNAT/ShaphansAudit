@@ -1,6 +1,7 @@
 //! One pass over transcript files, feeding each wanted record to the detectors.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -323,6 +324,7 @@ fn scan_file(
         session,
         since,
         last_time: None,
+        uuids: HashSet::new(),
         dets,
         active,
         st,
@@ -364,6 +366,8 @@ struct Feed<'a> {
     session: Session,
     since: DateTime<Utc>,
     last_time: Option<DateTime<Utc>>,
+    /// The `uuid` of each Claude record parsed so far in the file.
+    uuids: HashSet<String>,
     dets: &'a mut [Box<dyn Detector>],
     active: &'a [usize],
     st: &'a mut RootStats,
@@ -396,6 +400,13 @@ impl Feed<'_> {
             self.st.bad_lines += 1;
             return;
         };
+        // Claude Code can write a record again later in its file, with the same uuid.
+        if self.session.agent == Agent::Claude
+            && let Some(uuid) = value.get("uuid").and_then(Value::as_str)
+            && !self.uuids.insert(uuid.to_owned())
+        {
+            return;
+        }
         if let Some(t) = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -433,6 +444,62 @@ fn raw_timestamp(line: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts the records it is given.
+    struct Count(std::rc::Rc<std::cell::Cell<u64>>);
+
+    impl Detector for Count {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude, Agent::Codex]
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {
+            self.0.set(self.0.get() + 1);
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section::default()
+        }
+    }
+
+    #[test]
+    fn a_claude_record_written_again_with_its_uuid_is_read_once() {
+        let lines = [
+            r#"{"type":"assistant","uuid":"u1","message":{}}"#,
+            r#"{"type":"user","uuid":"u2","message":{}}"#,
+            r#"{"type":"assistant","uuid":"u1","slug":"s","message":{}}"#,
+            r#"{"type":"summary"}"#,
+            r#"{"type":"summary"}"#,
+        ]
+        .join("\n");
+        // Claude reads u1 once; Codex records carry no such uuid, so all count.
+        for (agent, want) in [(Agent::Claude, 4), (Agent::Codex, 5)] {
+            let mut st = RootStats {
+                agent,
+                root: PathBuf::new(),
+                files: 0,
+                unreadable: 0,
+                bad_lines: 0,
+                compressed: 0,
+            };
+            let n = std::rc::Rc::default();
+            let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
+            let reader = Box::new(io::Cursor::new(lines.clone().into_bytes()));
+            let path = Path::new("s.jsonl");
+            scan_file(
+                reader,
+                path,
+                agent,
+                DateTime::<Utc>::MIN_UTC,
+                &mut dets,
+                &[0],
+                &mut st,
+            )
+            .expect("read");
+            assert_eq!(n.get(), want, "{agent:?}");
+        }
+    }
 
     #[test]
     fn raw_timestamps_for_both_agents() {
