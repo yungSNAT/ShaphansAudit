@@ -234,8 +234,10 @@ pub struct CommandResult {
 /// tools.exec_command(...))` prints it, or holds them in lists and objects, as a
 /// printed `Promise.allSettled` does; a null `output` is empty. Results keep the
 /// order printed. An object holding results under more than one key gives the
-/// output no results, as the parsed object does not keep its keys' order. Any other
-/// `output` holds no text.
+/// output no results, as the parsed object does not keep its keys' order, and so do
+/// entries numbered by an `i` that does not rise in the order printed and a result
+/// still running, after which a result may be another session's. Any other `output`
+/// holds no text.
 ///
 /// shortcut: results are found only where the cell prints a result object whole; a
 /// cell that prints parts of one, such as its `output` alone, or none, gives no
@@ -258,8 +260,10 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
         _ => Vec::new(),
     };
     let mut results = Vec::new();
+    let mut last_i = None;
     let ordered = texts.iter().all(|t| {
-        serde_json::from_str::<Value>(t).map_or(true, |v| collect_results(&v, &mut results))
+        serde_json::from_str::<Value>(t)
+            .map_or(true, |v| collect_results(&v, &mut results, &mut last_i))
     });
     if !ordered {
         results.clear();
@@ -272,26 +276,38 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
 }
 
 /// Adds the results in `v` to `out` in order, and gives false when their order is
-/// unknown: an object holds results under more than one key.
-fn collect_results(v: &Value, out: &mut Vec<CommandResult>) -> bool {
-    if let Some(r) = command_result(v) {
+/// unknown: an object holds results under more than one key, an entry numbered `i`
+/// holds results but is not numbered above the one before it (`last_i`), or a result
+/// is still running, after which a result may be another session's.
+fn collect_results(v: &Value, out: &mut Vec<CommandResult>, last_i: &mut Option<u64>) -> bool {
+    let before = out.len();
+    let ordered = if let Some(r) = command_result(v) {
         out.push(r);
-        return true;
-    }
-    match v {
-        Value::Array(items) => items.iter().all(|x| collect_results(x, out)),
-        Value::Object(map) => {
-            let mut keys_with_results = 0;
-            for x in map.values() {
-                let before = out.len();
-                if !collect_results(x, out) {
-                    return false;
-                }
-                keys_with_results += usize::from(out.len() > before);
+        true
+    } else if v.get("session_id").is_some() && v.get("output").is_some() {
+        false
+    } else {
+        match v {
+            Value::Array(items) => items.iter().all(|x| collect_results(x, out, last_i)),
+            Value::Object(map) => {
+                let mut keys_with_results = 0;
+                map.values().all(|x| {
+                    let len = out.len();
+                    let ordered = collect_results(x, out, last_i);
+                    keys_with_results += usize::from(out.len() > len);
+                    ordered
+                }) && keys_with_results <= 1
             }
-            keys_with_results <= 1
+            _ => true,
         }
-        _ => true,
+    };
+    match v.get("i").and_then(Value::as_u64) {
+        Some(i) if ordered && out.len() > before => {
+            let follows = last_i.is_none_or(|last| i > last);
+            *last_i = Some(i);
+            follows
+        }
+        _ => ordered,
     }
 }
 
