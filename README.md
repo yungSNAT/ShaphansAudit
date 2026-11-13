@@ -129,6 +129,8 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
+The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude and Codex transcripts, plain and compressed. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
+
 ## Credits
 
 Named after Shaphan, the scribe who counted the temple silver and read the recovered scroll to the king (2 Kings 22, [NET](https://netbible.org)).

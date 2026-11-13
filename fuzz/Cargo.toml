@@ -1,0 +1,24 @@
+[package]
+name = "shaphansaudit-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+shaphansaudit = { path = ".." }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+libfuzzer-sys = "0.4.12"
+serde_json = "1"
+
+# Keep the fuzz crate out of any parent workspace.
+[workspace]
+
+[[bin]]
+name = "transcript"
+path = "fuzz_targets/transcript.rs"
+test = false
+doc = false
+bench = false
