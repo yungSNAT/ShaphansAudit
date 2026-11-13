@@ -243,7 +243,9 @@ pub struct CommandResult {
 ///
 /// shortcut: results are found only where the cell prints a result object whole; a
 /// cell that prints parts of one, such as its `output` alone, or none, gives no
-/// results. Reading the cell's code to follow each value would be the upgrade.
+/// results, and one that prints each result as it finishes can print them out of
+/// order. Pairing each command with the `CommandExecution` item Codex records as it
+/// ends would be the upgrade (DESIGN.md, Codex results).
 #[must_use]
 pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
     if r.kind() != "response_item" {
