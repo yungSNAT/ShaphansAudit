@@ -196,7 +196,8 @@ struct Lines {
 
 /// Why a transcript could not be opened.
 enum Open {
-    /// A `*.jsonl.zst` file that does not start with the zstd magic number.
+    /// A `*.jsonl.zst` file that does not start with the zstd magic number, or is
+    /// shorter than it.
     NotZstd,
     /// A file that cannot be read, or a zstd frame header that cannot be decoded.
     Io,
@@ -208,13 +209,22 @@ fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
     if path.extension().is_none_or(|x| x != "zst") {
         return Ok(Box::new(file));
     }
-    let decoder = StreamingDecoder::new(file).map_err(|e| match e {
-        FrameDecoderError::ReadFrameHeaderError(
-            ReadFrameHeaderError::BadMagicNumber(_) | ReadFrameHeaderError::MagicNumberReadError(_),
-        ) => Open::NotZstd,
-        _ => Open::Io,
-    })?;
+    let decoder = StreamingDecoder::new(file).map_err(header_error)?;
     Ok(Box::new(BufReader::new(OneFrame(decoder))))
+}
+
+/// Why a zstd frame header could not be read: a file that ends before the magic
+/// number is not zstd, but one whose read fails is unreadable.
+fn header_error(e: FrameDecoderError) -> Open {
+    use ReadFrameHeaderError::{BadMagicNumber, MagicNumberReadError};
+    let FrameDecoderError::ReadFrameHeaderError(e) = e else {
+        return Open::Io;
+    };
+    match e {
+        BadMagicNumber(_) => Open::NotZstd,
+        MagicNumberReadError(e) if e.kind() == io::ErrorKind::UnexpectedEof => Open::NotZstd,
+        _ => Open::Io,
+    }
 }
 
 /// Decodes a compressed transcript and fails, rather than stopping quietly, on a bad
@@ -258,7 +268,8 @@ impl Lines {
         }
     }
 
-    /// The next line no longer than `MAX_LINE`, skipping and counting longer ones.
+    /// The next line of at most `MAX_LINE` bytes before its newline, skipping and
+    /// counting longer ones.
     fn next_line(&mut self) -> io::Result<Option<Cow<'_, str>>> {
         loop {
             self.buf.clear();
@@ -269,10 +280,17 @@ impl Lines {
                 return Ok(None);
             }
             if n as u64 == MAX_LINE && self.buf.last() != Some(&b'\n') {
-                self.reader.skip_until(b'\n')?;
-                self.over_long += 1;
-                self.buf = Vec::new();
-                continue;
+                // The cap was reached: the line is longer only if more of it follows.
+                match self.reader.fill_buf()?.first() {
+                    None => {}
+                    Some(b'\n') => self.reader.consume(1),
+                    Some(_) => {
+                        self.reader.skip_until(b'\n')?;
+                        self.over_long += 1;
+                        self.buf = Vec::new();
+                        continue;
+                    }
+                }
             }
             return Ok(Some(String::from_utf8_lossy(&self.buf)));
         }
@@ -423,6 +441,21 @@ mod tests {
         let claude = r#"{"type":"user","message":{"content":"a \"timestamp\":\"x\""},"timestamp":"2026-11-08T02:00:00Z"}"#;
         assert_eq!(raw_timestamp(claude), parse_ts("2026-11-08T02:00:00Z"));
         assert_eq!(raw_timestamp(r#"{"type":"summary"}"#), None);
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_cap_is_read() {
+        let record = format!("{{\"a\":\"{}\"}}", "a".repeat(MAX_LINE as usize - 8));
+        assert_eq!(record.len() as u64, MAX_LINE);
+        // At the end of the file, and before a newline and another line.
+        for rest in [&b""[..], b"\n{}"] {
+            let bytes = [record.as_bytes(), rest].concat();
+            let mut lines = Lines::new(Box::new(io::Cursor::new(bytes)));
+            let first = lines.next_line().expect("read").map(|l| l.len() as u64);
+            assert_eq!((first, lines.over_long), (Some(MAX_LINE), 0), "{rest:?}");
+            let next = lines.next_line().expect("read").map(Cow::into_owned);
+            assert_eq!(next.as_deref(), (!rest.is_empty()).then_some("{}"));
+        }
     }
 
     #[test]
