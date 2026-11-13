@@ -6,8 +6,8 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, est_tokens, from_results, input_str, name_of, result_chars,
-    tool_results, tool_uses,
+    EST_NOTE, codex_call, codex_call_line, est_tokens, from_results, input_str, name_of,
+    result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -155,7 +155,7 @@ impl Detector for Polls {
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
                 "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. Both are read for Claude only.".to_owned(),
-                "Token estimates (tokens est) divide characters by 4; the model's own count differs.".to_owned(),
+                EST_NOTE.to_owned(),
             ],
         }
     }

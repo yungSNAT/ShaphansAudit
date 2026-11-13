@@ -113,6 +113,9 @@ pub fn est_tokens(chars: u64) -> u64 {
     chars.div_ceil(4)
 }
 
+/// The note of each section with `*_tokens_est` columns.
+pub const EST_NOTE: &str = "Token estimates (tokens est) divide each row's characters by 4, rounded up, so rows need not add up to a total; the model's own count differs.";
+
 /// A count taken from tool results, which are read for Claude only: null for Codex.
 #[must_use]
 pub fn from_results(agent: Agent, n: u64) -> Value {

@@ -43,7 +43,7 @@ This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions` and `~/.
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
 
-Columns ending in `tokens est` estimate tokens as the characters beside them divided by 4.
+Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total.
 
 Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 

@@ -104,6 +104,7 @@ fn startup_measures_main_sessions_started_in_the_window() {
     assert_eq!(s["sessions"], 1);
     assert_eq!(s["entry_points"], "claude-desktop 1");
     assert_eq!(s["median_total_chars"], 230);
+    assert_eq!(s["sessions_with_request_tokens"], 1);
     assert_eq!(s["median_first_request_tokens"], 4312);
     let r = rows(&doc, "startup", 0);
     for (piece, chars) in [

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use super::startup::loaded_tools;
-use super::{est_tokens, name_of, tool_uses};
+use super::{EST_NOTE, est_tokens, name_of, tool_uses};
 use crate::report::{Opts, Section, Table, median};
 use crate::scan::{Agent, Detector, Record, Session};
 
@@ -156,7 +156,7 @@ impl Detector for Schemas {
             tables: vec![table],
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
-                "Token estimates (tokens est) divide characters by 4; the model's own count differs.".to_owned(),
+                EST_NOTE.to_owned(),
                 "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
             ],
         }

@@ -138,29 +138,40 @@ impl Detector for Startup {
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
+        Section {
+            name: "startup",
+            title: "loaded before the first reply of each main session (Claude)",
+            summary: self.summary(),
+            tables: vec![table],
+            notes: vec![
+                "Only sessions whose first attachment, request or reply falls in the window are measured.".to_owned(),
+                "First request tokens are the input tokens Claude Code recorded for the first reply, cached or not, over the sessions with request tokens; characters by source are not tokens.".to_owned(),
+            ],
+        }
+    }
+}
+
+impl Startup {
+    fn summary(&self) -> Vec<(String, Value)> {
         let entry: Vec<String> = self
             .entrypoints
             .iter()
             .map(|(k, v)| format!("{k} {v}"))
             .collect();
-        Section {
-            name: "startup",
-            title: "loaded before the first reply of each main session (Claude)",
-            summary: vec![
-                ("sessions".to_owned(), json!(self.totals.len())),
-                ("entry_points".to_owned(), json!(entry.join(", "))),
-                ("median_total_chars".to_owned(), json!(median(&self.totals))),
-                (
-                    "median_first_request_tokens".to_owned(),
-                    json!((!self.first_tokens.is_empty()).then(|| median(&self.first_tokens))),
-                ),
-            ],
-            tables: vec![table],
-            notes: vec![
-                "Only sessions whose first attachment, request or reply falls in the window are measured.".to_owned(),
-                "First request tokens are the input tokens Claude Code recorded for the first reply, cached or not; characters by source are not tokens.".to_owned(),
-            ],
-        }
+        let tokens = &self.first_tokens;
+        vec![
+            ("sessions".to_owned(), json!(self.totals.len())),
+            ("entry_points".to_owned(), json!(entry.join(", "))),
+            ("median_total_chars".to_owned(), json!(median(&self.totals))),
+            (
+                "sessions_with_request_tokens".to_owned(),
+                json!(tokens.len()),
+            ),
+            (
+                "median_first_request_tokens".to_owned(),
+                json!((!tokens.is_empty()).then(|| median(tokens))),
+            ),
+        ]
     }
 }
 
@@ -206,9 +217,14 @@ fn add_attachment(pieces: &mut BTreeMap<String, u64>, a: &Value, programs: &Prog
     }
 }
 
-/// A reply's recorded input tokens: new, cache writes and cache reads.
+/// A reply's recorded input tokens: new, cache writes and cache reads. A reply that
+/// Claude Code made up itself, such as an error, has model `<synthetic>` and no request.
 fn input_tokens(reply: &Value) -> Option<u64> {
-    let usage = reply.pointer("/message/usage")?;
+    let message = reply.get("message")?;
+    if message.get("model").and_then(Value::as_str) == Some("<synthetic>") {
+        return None;
+    }
+    let usage = message.get("usage")?;
     let field = |k: &str| usage.get(k).and_then(Value::as_u64);
     Some(
         field("input_tokens")?
@@ -285,5 +301,30 @@ mod tests {
         d.end(&s);
         assert_eq!(d.totals, vec![0]);
         assert!(!d.pieces.contains_key("tool schemas (loaded)"));
+    }
+
+    #[test]
+    fn request_tokens_come_only_from_a_real_request() {
+        let reply = |model: &str, usage: &str| {
+            serde_json::from_str::<Value>(&format!(
+                r#"{{"type":"assistant","message":{{"model":"{model}","usage":{usage}}}}}"#
+            ))
+            .expect("valid JSON")
+        };
+        let full =
+            r#"{"input_tokens":2,"cache_creation_input_tokens":30,"cache_read_input_tokens":400}"#;
+        assert_eq!(input_tokens(&reply("claude-x", full)), Some(432));
+        assert_eq!(
+            input_tokens(&reply("claude-x", r#"{"input_tokens":7}"#)),
+            Some(7)
+        );
+        assert_eq!(
+            input_tokens(&reply("claude-x", r#"{"output_tokens":7}"#)),
+            None
+        );
+        assert_eq!(
+            input_tokens(&reply("<synthetic>", r#"{"input_tokens":0}"#)),
+            None
+        );
     }
 }
