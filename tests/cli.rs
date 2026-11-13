@@ -360,14 +360,14 @@ fn polls_read_codex_command_results() {
             row["commands"].clone(),
             row["polls"].clone(),
             row["polls_after_failure"].clone(),
-            row["poll_chars"].clone()
+            row["poll_chars"].clone(),
+            row["poll_tokens_est"].clone()
         ),
-        (json!(7), json!(2), json!(1), json!(5))
+        (json!(7), json!(2), json!(1), json!(5), json!(2))
     );
-    assert_eq!(
-        doc["detectors"]["polls"]["summary"]["codex_outputs_not_paired"],
-        2
-    );
+    let summary = &doc["detectors"]["polls"]["summary"];
+    assert_eq!(summary["codex_outputs_not_paired"], 2);
+    assert_eq!(summary["codex_commands_not_paired"], 4);
 }
 
 #[test]
@@ -400,10 +400,63 @@ fn rereads_count_codex_output_characters() {
         (
             row["reads"].clone(),
             row["rereads"].clone(),
-            row["reread_chars"].clone()
+            row["reread_chars"].clone(),
+            row["reread_tokens_est"].clone()
         ),
-        (json!(2), json!(1), json!(5))
+        (json!(2), json!(1), json!(5), json!(2))
     );
+}
+
+const CODEX_WRAPPED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-wrapped");
+
+#[test]
+fn codex_results_printed_inside_lists_and_objects_are_paired() {
+    // Cells print allSettled entries, one list of them, results under 2 keys of an
+    // object, a result still running and a result's output text alone.
+    let args = |json: bool| {
+        let mut a = vec![
+            "all",
+            "--codex-root",
+            CODEX_WRAPPED,
+            "--agent",
+            "codex",
+            "--since",
+            SINCE,
+        ];
+        if json {
+            a.push("--json");
+        }
+        a
+    };
+    let (code, stdout, stderr) = run(&args(true));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
+    let keys = [
+        "commands",
+        "polls",
+        "polls_after_failure",
+        "poll_chars",
+        "poll_tokens_est",
+    ];
+    let got: Vec<Value> = keys.iter().map(|k| row[*k].clone()).collect();
+    assert_eq!(got, [json!(9), json!(4), json!(1), json!(22), json!(6)]);
+    let polls = &doc["detectors"]["polls"]["summary"];
+    assert_eq!(polls["codex_outputs_not_paired"], 3);
+    assert_eq!(polls["codex_commands_not_paired"], 4);
+    let pipes = &doc["detectors"]["pipes"]["summary"];
+    for (key, n) in [
+        ("unguarded", 1),
+        ("unguarded_results_found", 1),
+        ("showed_a_failure_but_reported_success", 1),
+        ("codex_outputs_not_paired", 0),
+    ] {
+        assert_eq!(pipes[key], n, "{key}");
+    }
+
+    let (code, stdout, stderr) = run(&args(false));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("codex commands not paired: 4"), "{stdout}");
 }
 
 #[test]
@@ -805,6 +858,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(CLAUDE, CODEX);
     assert_no_sentinel(RESULTS, CODEX);
     assert_no_sentinel(RESULTS, CODEX_RESULTS);
+    assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
 }
 

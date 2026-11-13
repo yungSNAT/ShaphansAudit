@@ -51,15 +51,35 @@ fn commands(cmds: &[&str]) -> String {
 /// An `exec` call's output: the status line, then one printed result per
 /// `(exit_code, output)`, where the output is a string or null.
 fn output(id: &str, results: &[(i64, Value)]) -> String {
+    let texts: Vec<Value> = results
+        .iter()
+        .map(|(code, out)| result(*code, out))
+        .collect();
+    printed(id, &texts)
+}
+
+/// An `exec_command` result.
+fn result(code: i64, out: &Value) -> Value {
+    json!({"chunk_id": "k", "exit_code": code, "output": out})
+}
+
+/// An `exec` call's output: the status line, then each of `texts` printed as JSON.
+fn printed(id: &str, texts: &[Value]) -> String {
     let head = json!({"type": "input_text", "text": "Script completed\nWall time: 0.5 seconds\nOutput:\n"});
     let items: Vec<Value> = std::iter::once(head)
-        .chain(results.iter().map(|(code, out)| {
-            let result = json!({"chunk_id": "k", "exit_code": code, "output": out});
-            json!({"type": "input_text", "text": result.to_string()})
-        }))
+        .chain(
+            texts
+                .iter()
+                .map(|t| json!({"type": "input_text", "text": t.to_string()})),
+        )
         .collect();
     json!({"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": id, "output": items}})
         .to_string()
+}
+
+/// A printed `Promise.allSettled` entry holding `value`.
+fn settled(value: Value) -> Value {
+    json!({"status": "fulfilled", "value": value})
 }
 
 fn compacted() -> String {
@@ -111,6 +131,92 @@ fn polls(lines: &[(bool, String)]) -> (Vec<Value>, Value) {
 
 fn counts(polls: u64, after_failure: u64, chars: u64) -> Vec<Value> {
     vec![json!(polls), json!(after_failure), json!(chars)]
+}
+
+/// Polls' outputs and commands not paired.
+fn not_paired(lines: &[(bool, String)]) -> (Value, Value) {
+    let mut d = Polls::default();
+    replay(&mut d, lines);
+    (
+        summary(&d, "codex_outputs_not_paired"),
+        summary(&d, "codex_commands_not_paired"),
+    )
+}
+
+#[test]
+fn results_printed_inside_lists_and_objects_pair_in_order() {
+    let status_diff = commands(&["git status", "git diff"]);
+    let lines = in_window(&[
+        // `{i, status, value}` per command, as a cell numbering allSettled entries
+        // prints them; the tool result between them is not a command's.
+        exec("a", &status_diff),
+        printed(
+            "a",
+            &[
+                json!({"i": 0, "status": "fulfilled", "value": result(1, &json!("e"))}),
+                json!({"i": 1, "status": "fulfilled", "value": {"content": [], "isError": false}}),
+                json!({"i": 2, "status": "fulfilled", "value": result(0, &json!("d"))}),
+            ],
+        ),
+        // `{i, result: {status, value}}`: git diff passed, so its poll does not
+        // follow a failure.
+        exec("b", &commands(&["git diff"])),
+        printed(
+            "b",
+            &[json!({"i": 0, "result": settled(result(0, &json!("ab")))})],
+        ),
+        // A list of `{status, value}`: git status failed, so its poll does.
+        exec("c", &status_diff),
+        printed(
+            "c",
+            &[json!([
+                settled(result(0, &json!("cde"))),
+                settled(result(0, &json!("f")))
+            ])],
+        ),
+    ]);
+    assert_eq!(polls(&lines), (counts(3, 1, 6), json!(0)));
+    assert_eq!(not_paired(&lines), (json!(0), json!(0)));
+}
+
+#[test]
+fn results_under_2_keys_of_an_object_pair_with_neither_command() {
+    // A parsed object does not keep its keys' order.
+    let lines = in_window(&[
+        exec("a", &commands(&["git status", "git diff"])),
+        printed(
+            "a",
+            &[json!({"status": result(0, &json!("s")), "diff": result(1, &json!("d"))})],
+        ),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+}
+
+#[test]
+fn a_result_still_running_or_printed_in_part_is_not_one() {
+    let lines = in_window(&[
+        exec("a", &commands(&["cargo build"])),
+        printed(
+            "a",
+            &[json!({"chunk_id": "k", "session_id": 7, "output": "Compiling"})],
+        ),
+        exec("b", &commands(&["git status"])),
+        printed("b", &[json!("clean")]),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+}
+
+#[test]
+fn commands_not_paired_counts_each_command_of_each_cell_in_the_window() {
+    let lines = [
+        (true, exec("a", &commands(&["git status", "git diff"]))),
+        (true, output("a", &[(0, json!("ok"))])),
+        (true, exec("", &commands(&["git log", "git diff", "ls"]))),
+        (true, exec("b", &commands(&["git status"]))),
+        (true, output("b", &[(0, json!("ok"))])),
+        (false, exec("c", &commands(&["git status"]))),
+    ];
+    assert_eq!(not_paired(&lines), (json!(2), json!(5)));
 }
 
 #[test]
