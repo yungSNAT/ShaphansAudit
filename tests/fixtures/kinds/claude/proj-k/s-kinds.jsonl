@@ -1,0 +1,9 @@
+{"type":"attachment","timestamp":"2026-11-09T01:00:00.000Z","entrypoint":"cli","attachment":{"type":"agent_listing_delta","addedLines":["ab","cde"]}}
+{"type":"attachment","timestamp":"2026-11-09T01:00:00.000Z","entrypoint":"cli","attachment":{"type":"prompt_snapshot","systemPrompt":["abcd"]}}
+{"type":"attachment","timestamp":"2026-11-09T01:00:00.000Z","entrypoint":"cli","attachment":{"type":"session_context","context":{"k":"v"}}}
+{"type":"attachment","timestamp":"2026-11-09T01:00:00.000Z","entrypoint":"cli","attachment":{"type":"environment","snapshot":{"os":"x"}}}
+{"type":"attachment","timestamp":"2026-11-09T01:00:00.000Z","entrypoint":"cli","attachment":{"type":"custom_thing","n":1}}
+{"type":"assistant","timestamp":"2026-11-09T01:01:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"k1","name":"Bash","input":{"command":"cargo test 2>&1 | tail -3"}}]}}
+{"type":"attachment","timestamp":"2026-11-09T01:01:01.000Z","entrypoint":"cli","attachment":{"type":"hook_blocking_error","hookName":"PreToolUse:Bash","hookEvent":"PreToolUse","command":"\"tests/fixtures/hooks/guard.exe\" --ccd-pr","blockingError":"SENTINEL-HOOK-BLOCK","durationMs":50}}
+{"type":"user","timestamp":"2026-11-09T01:01:10.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"k1","content":"Compiling SENTINEL-OUTPUT","is_error":false}]}}
+{"type":"attachment","timestamp":"2026-11-09T01:01:11.000Z","entrypoint":"cli","attachment":{"type":"hook_non_blocking_error","hookName":"PostToolUse:Bash","hookEvent":"PostToolUse","command":"node tests/fixtures/hooks/hub-digest.js --check","stderr":"SENTINEL-HOOK-ERROR","durationMs":30}}
