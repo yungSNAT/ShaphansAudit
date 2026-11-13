@@ -15,7 +15,7 @@
 
 </div>
 
-`shaphan` reads the transcripts that Claude Code and Codex save on your machine and reports where tokens and checks are wasted: context loaded before the first reply, tool schemas loaded but never called, test output piped past its exit status, repeated polling, files re-read after a compaction and slow hooks.
+`shaphan` reads the transcripts that Claude Code and Codex save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, tool schemas loaded but never called, test output piped past its exit status, repeated polling, files re-read after a compaction and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -86,7 +86,7 @@ By hook name and command, most cancellations first
 
 | Command | Agents | Reports |
 |---|---|---|
-| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
+| `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
 | `pipes` | Claude, Codex | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
 | `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose last result was an error and the characters polls returned |
@@ -121,7 +121,7 @@ For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). [C
 
 ## Development
 
-`rust-toolchain.toml` pins the compiler. CI runs these on Linux and Windows:
+`rust-toolchain.toml` pins the compiler. CI runs these on Linux, macOS and Windows:
 
 ```bash
 cargo fmt --check
