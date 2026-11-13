@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use crate::cli::Command;
 use crate::programs::Programs;
+#[cfg(test)]
+use crate::scan::Session;
 use crate::scan::{Detector, Record};
 use crate::shell::{self, Step};
 
@@ -372,8 +374,9 @@ impl<T> CodexCalls<T> {
         }
     }
 
-    /// Counts a call of `commands` commands that will not be paired, if in the window.
-    fn not_paired(&mut self, commands: usize, in_window: bool) {
+    /// Counts a call of `commands` commands that will not be paired, if in the window,
+    /// such as a `function_call`, whose output is not read.
+    pub fn not_paired(&mut self, commands: usize, in_window: bool) {
         if in_window {
             self.unpaired += 1;
             self.unpaired_commands += commands as u64;
@@ -415,6 +418,99 @@ impl<T> CodexCalls<T> {
     }
 }
 
+/// Claude `tool_use` blocks whose result a detector awaits, by id, and the ids of the
+/// session's blocks so far.
+pub struct ClaudeCalls<T> {
+    seen: HashSet<String>,
+    awaited: HashMap<String, T>,
+}
+
+impl<T> Default for ClaudeCalls<T> {
+    fn default() -> Self {
+        Self {
+            seen: HashSet::new(),
+            awaited: HashMap::new(),
+        }
+    }
+}
+
+impl<T> ClaudeCalls<T> {
+    /// Notes a `tool_use` block, which a detector reading results must do for every
+    /// block so that a reused id is seen, and says whether its result can be
+    /// awaited: it has a non-empty id that no earlier block in the session carried. An id
+    /// carried by more than one block pairs with neither from then on, as their
+    /// results cannot be told apart.
+    pub fn note(&mut self, id: Option<&str>) -> bool {
+        let id = id.filter(|id| !id.is_empty());
+        let fresh = id.is_some_and(|id| self.seen.insert(id.to_owned()));
+        if !fresh && let Some(id) = id {
+            self.awaited.remove(id);
+        }
+        fresh
+    }
+
+    /// Awaits the result of a block that `note` said can be awaited.
+    pub fn wait(&mut self, id: &str, run: T) {
+        self.awaited.insert(id.to_owned(), run);
+    }
+
+    /// True for lines that may hold an awaited block's result.
+    #[must_use]
+    pub fn wants(&self, line: &str) -> bool {
+        line.contains("\"tool_result\"") && self.awaited.keys().any(|id| line.contains(id.as_str()))
+    }
+
+    /// What the detector kept for the block whose result has id `id`, if awaited; it
+    /// is awaited no longer.
+    pub fn take(&mut self, id: &str) -> Option<T> {
+        self.awaited.remove(id)
+    }
+
+    /// Starts a session.
+    pub fn clear(&mut self) {
+        self.seen.clear();
+        self.awaited.clear();
+    }
+}
+
+/// Feeds one session to `d` as the scan does, parsing only the lines it wants; each
+/// line comes with whether it is in the window.
+#[cfg(test)]
+fn replay(d: &mut dyn Detector, s: &Session, lines: &[(bool, String)]) {
+    d.begin(s);
+    for (in_window, line) in lines {
+        if d.wants(s, line) {
+            let value: Value = serde_json::from_str(line).expect("test record");
+            d.record(
+                s,
+                &Record {
+                    value: &value,
+                    in_window: *in_window,
+                },
+            );
+        }
+    }
+    d.end(s);
+}
+
+/// A Claude `tool_use` block of tool `name` with `input`, under id `id`.
+#[cfg(test)]
+fn claude_tool_use(id: &str, name: &str, input: &Value) -> String {
+    serde_json::json!({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": id, "name": name, "input": input}
+    ]}})
+    .to_string()
+}
+
+/// A Claude `tool_result` block for id `id` holding `text`.
+#[cfg(test)]
+fn claude_tool_result(id: &str, text: &str) -> String {
+    serde_json::json!({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": id, "content": text}
+    ]}})
+    .to_string()
+}
+
 /// A `cmd` argument as one command line; `[shell, flag, script]` gives the script.
 fn function_command(cmd: &Value) -> Option<String> {
     match cmd {
@@ -442,6 +538,15 @@ fn function_command(cmd: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_empty_or_missing_claude_id_is_never_awaited() {
+        let mut calls = ClaudeCalls::<()>::default();
+        assert!(!calls.note(None));
+        assert!(!calls.note(Some("")));
+        assert!(calls.note(Some("toolu_a")));
+        assert!(!calls.note(Some("toolu_a")));
+    }
 
     #[test]
     fn function_command_takes_the_script_after_the_shell_flag() {
