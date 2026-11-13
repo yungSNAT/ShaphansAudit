@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![CI](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml) [![licence: FSL-1.1-ALv2](.github/assets/badges/licence.svg)](#licence)
+[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/ShaphansAudit/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml?query=branch%3Amain) [![licence: FSL-1.1-ALv2](.github/assets/badges/licence.svg)](#licence)
 
 [Install](#install) · [Use](#use) · [Privacy](#privacy) · [Limits](#limits) · [Development](#development) · [Credits](#credits) · [Licence](#licence)
 
@@ -125,7 +125,7 @@ cargo test --locked
 
 Named after Shaphan, the scribe who counted the temple silver and read the recovered scroll to the king (2 Kings 22, [NET](https://netbible.org)).
 
-The banner's lettering and emblem are drawn from Cascadia Mono and Besley glyphs (SIL OFL 1.1).
+The banner's lettering uses Cascadia Mono and Besley glyphs (SIL OFL 1.1); its coin emblem is hand-drawn pixel art.
 
 ## Licence
 
