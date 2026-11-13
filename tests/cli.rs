@@ -436,6 +436,161 @@ fn codex_default_reads_archived_sessions_and_counts_compressed_files() {
     );
 }
 
+/// `rollout-main.jsonl` compressed by the zstd 1.5.7 command line tool with `--check`.
+const ZST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/zst/rollout-main.jsonl.zst"
+);
+
+/// Runs `polls` for Codex over one folder holding the given files.
+fn codex_polls(name: &str, files: &[(&str, &[u8])]) -> Value {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    for (file, bytes) in files {
+        std::fs::write(dir.join(file), bytes).expect("transcript");
+    }
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "codex",
+        "--codex-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+fn root_counts(doc: &Value) -> [&Value; 4] {
+    let r = &doc["roots"][0];
+    [
+        &r["files"],
+        &r["unreadable"],
+        &r["lines_skipped"],
+        &r["compressed_skipped"],
+    ]
+}
+
+#[test]
+fn codex_reads_compressed_rollouts_as_it_reads_plain_ones() {
+    let plain = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    let packed = std::fs::read(ZST).expect("fixture");
+    let from_plain = codex_polls("zst-plain", &[("rollout.jsonl", &plain)]);
+    let from_packed = codex_polls("zst-packed", &[("rollout.jsonl.zst", &packed)]);
+    assert_eq!(
+        root_counts(&from_packed),
+        [&json!(1), &json!(0), &json!(0), &json!(0)]
+    );
+    assert_eq!(
+        from_packed["detectors"]["polls"],
+        from_plain["detectors"]["polls"]
+    );
+    assert!(
+        rows(&from_packed, "polls", 0)
+            .iter()
+            .any(|r| r["polls"] != 0)
+    );
+}
+
+#[test]
+fn codex_counts_every_compressed_rollout_it_cannot_decode() {
+    let packed = std::fs::read(ZST).expect("fixture");
+    let mut bad_sum = packed.clone();
+    *bad_sum.last_mut().expect("checksum") ^= 0xff;
+    let two_frames = [packed.as_slice(), packed.as_slice()].concat();
+    let trailing_byte = [packed.as_slice(), b"\0"].concat();
+    // Frame headers asking for a 256 MiB window, and for one 1 GiB segment, above
+    // the decoder's 128 MiB limit.
+    let magic = [0x28, 0xb5, 0x2f, 0xfd];
+    let big_window = [&magic[..], &[0x00, 0x90]].concat();
+    let big_segment = [&magic[..], &[0xa0, 0, 0, 0, 0x40]].concat();
+    let doc = codex_polls(
+        "zst-bad",
+        &[
+            ("cut.jsonl.zst", &packed[..packed.len() / 2]),
+            ("head.jsonl.zst", &packed[..5]),
+            ("sum.jsonl.zst", &bad_sum),
+            ("two.jsonl.zst", &two_frames),
+            ("byte.jsonl.zst", &trailing_byte),
+            ("window.jsonl.zst", &big_window),
+            ("segment.jsonl.zst", &big_segment),
+            ("text.jsonl.zst", b"{\"type\":\"session_meta\"}\n"),
+            ("short.jsonl.zst", &magic[..2]),
+        ],
+    );
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(7), &json!(7), &json!(0), &json!(2)]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_counts_a_compressed_rollout_whose_read_fails_as_unreadable() {
+    // A link to a folder opens, but reading the magic number from it fails.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("zst-read-error");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    let link = dir.join("rollout.jsonl.zst");
+    std::os::unix::fs::symlink(env!("CARGO_TARGET_TMPDIR"), link).expect("link");
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "codex",
+        "--codex-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(1), &json!(1), &json!(0), &json!(0)]
+    );
+}
+
+/// A zstd frame with a 1 MiB window and no checksum that decodes to a line of
+/// `a` 128 KiB longer than the 64 MiB line cap, then `rest`, of at most 128 KiB.
+fn frame_with_long_line(rest: &[u8]) -> Vec<u8> {
+    let block = |size: usize, kind: u32, last: bool| {
+        let header =
+            (u32::try_from(size).expect("block size") << 3) | (kind << 1) | u32::from(last);
+        header.to_le_bytes()[..3].to_vec()
+    };
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x50];
+    for _ in 0..513 {
+        // An RLE block: 128 KiB of one byte.
+        frame.extend(block(128 << 10, 1, false));
+        frame.push(b'a');
+    }
+    frame.extend(block(rest.len(), 0, true));
+    frame.extend_from_slice(rest);
+    frame
+}
+
+#[test]
+fn codex_skips_a_decoded_line_over_the_cap_and_reads_the_rest() {
+    let plain = std::fs::read(format!("{CODEX}/2026/11/08/rollout-main.jsonl")).expect("fixture");
+    let packed = frame_with_long_line(&[b"\n", plain.as_slice()].concat());
+    let from_plain = codex_polls("zst-long-plain", &[("rollout.jsonl", &plain)]);
+    let from_packed = codex_polls("zst-long", &[("rollout.jsonl.zst", &packed)]);
+    assert_eq!(
+        root_counts(&from_packed),
+        [&json!(1), &json!(0), &json!(1), &json!(0)]
+    );
+    assert_eq!(
+        from_packed["detectors"]["polls"],
+        from_plain["detectors"]["polls"]
+    );
+}
+
 /// Runs `all` over two roots with each output flag and checks that no sentinel
 /// appears in any case: verb classes and paths are lower-cased.
 fn assert_no_sentinel(claude: &str, codex: &str) {

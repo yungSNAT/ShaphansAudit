@@ -2,11 +2,13 @@
 
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
 use crate::report::{Opts, Section};
@@ -84,7 +86,8 @@ pub struct RootStats {
     pub files: u64,
     pub unreadable: u64,
     pub bad_lines: u64,
-    /// Compressed `*.jsonl.zst` transcripts in the window, which the scan cannot read.
+    /// `*.jsonl.zst` transcripts in the window that do not start with the zstd magic
+    /// number, so nothing in them was read.
     pub compressed: u64,
 }
 
@@ -119,8 +122,20 @@ pub fn scan(
             compressed: 0,
         };
         for path in list_files(root, cutoff, &mut st) {
+            let reader = match open(&path) {
+                Ok(r) => r,
+                Err(Open::NotZstd) => {
+                    st.compressed += 1;
+                    continue;
+                }
+                Err(Open::Io) => {
+                    st.files += 1;
+                    st.unreadable += 1;
+                    continue;
+                }
+            };
             st.files += 1;
-            if scan_file(&path, *agent, since, dets, &active, &mut st).is_err() {
+            if scan_file(reader, &path, *agent, since, dets, &active, &mut st).is_err() {
                 st.unreadable += 1;
             }
         }
@@ -154,7 +169,6 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                     continue;
                 }
                 match entry.metadata().and_then(|m| m.modified()) {
-                    Ok(m) if m >= cutoff && compressed => st.compressed += 1,
                     Ok(m) if m >= cutoff => out.push(path),
                     Ok(_) => {}
                     Err(_) => st.unreadable += 1,
@@ -166,24 +180,125 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
     out
 }
 
-/// shortcut: each line is read whole, so memory grows with the longest line (a few
-/// MB in real transcripts); a reader that skips lines over a cap would bound it.
+/// The longest line read, in bytes. A decoded `*.jsonl.zst` line is not bounded by
+/// the file's size: a small frame can decode to gigabytes with no newline.
+const MAX_LINE: u64 = 64 << 20;
+
+/// shortcut: a line is held whole up to `MAX_LINE` bytes, far above the few MB of
+/// the longest lines seen in real transcripts; a longer one is skipped unread and
+/// counted as a skipped line. Parsing records as a stream would remove the cap.
 struct Lines {
-    reader: BufReader<File>,
+    reader: Box<dyn BufRead>,
     buf: Vec<u8>,
+    /// Lines skipped for being longer than `MAX_LINE`.
+    over_long: u64,
+}
+
+/// Why a transcript could not be opened.
+enum Open {
+    /// A `*.jsonl.zst` file that does not start with the zstd magic number, or is
+    /// shorter than it.
+    NotZstd,
+    /// A file that cannot be read, or a zstd frame header that cannot be decoded.
+    Io,
+}
+
+/// Opens a transcript, decoding a `*.jsonl.zst` one as it is read.
+fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
+    let file = BufReader::new(File::open(path).map_err(|_| Open::Io)?);
+    if path.extension().is_none_or(|x| x != "zst") {
+        return Ok(Box::new(file));
+    }
+    let decoder = StreamingDecoder::new(file).map_err(header_error)?;
+    Ok(Box::new(BufReader::new(OneFrame(decoder))))
+}
+
+/// Why a zstd frame header could not be read: a file that ends before the magic
+/// number is not zstd, but one whose read fails is unreadable.
+fn header_error(e: FrameDecoderError) -> Open {
+    use ReadFrameHeaderError::{BadMagicNumber, MagicNumberReadError};
+    let FrameDecoderError::ReadFrameHeaderError(e) = e else {
+        return Open::Io;
+    };
+    match e {
+        BadMagicNumber(_) => Open::NotZstd,
+        MagicNumberReadError(e) if e.kind() == io::ErrorKind::UnexpectedEof => Open::NotZstd,
+        _ => Open::Io,
+    }
+}
+
+/// Decodes a compressed transcript and fails, rather than stopping quietly, on a bad
+/// checksum or anything after the frame.
+///
+/// shortcut: reads one zstd frame, as Codex writes one per rollout (all 203 on one
+/// machine had one, 13 November 2026); a file with more frames counts as unreadable
+/// after its first. Decoding each frame in turn would be the upgrade.
+struct OneFrame(StreamingDecoder<BufReader<File>, FrameDecoder>);
+
+impl Read for OneFrame {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.0.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            let frame = &self.0.decoder;
+            if let Some(sum) = frame.get_checksum_from_data()
+                && frame.get_calculated_checksum() != Some(sum)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "zstd checksum mismatch",
+                ));
+            }
+            if !self.0.get_mut().fill_buf()?.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "data after the zstd frame",
+                ));
+            }
+        }
+        Ok(n)
+    }
 }
 
 impl Lines {
-    fn next_line(&mut self) -> io::Result<Option<Cow<'_, str>>> {
-        self.buf.clear();
-        if self.reader.read_until(b'\n', &mut self.buf)? == 0 {
-            return Ok(None);
+    fn new(reader: Box<dyn BufRead>) -> Self {
+        Lines {
+            reader,
+            buf: Vec::new(),
+            over_long: 0,
         }
-        Ok(Some(String::from_utf8_lossy(&self.buf)))
+    }
+
+    /// The next line of at most `MAX_LINE` bytes before its newline, skipping and
+    /// counting longer ones.
+    fn next_line(&mut self) -> io::Result<Option<Cow<'_, str>>> {
+        loop {
+            self.buf.clear();
+            let n = (&mut self.reader)
+                .take(MAX_LINE)
+                .read_until(b'\n', &mut self.buf)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            if n as u64 == MAX_LINE && self.buf.last() != Some(&b'\n') {
+                // The cap was reached: the line is longer only if more of it follows.
+                match self.reader.fill_buf()?.first() {
+                    None => {}
+                    Some(b'\n') => self.reader.consume(1),
+                    Some(_) => {
+                        self.reader.skip_until(b'\n')?;
+                        self.over_long += 1;
+                        self.buf = Vec::new();
+                        continue;
+                    }
+                }
+            }
+            return Ok(Some(String::from_utf8_lossy(&self.buf)));
+        }
     }
 }
 
 fn scan_file(
+    reader: Box<dyn BufRead>,
     path: &Path,
     agent: Agent,
     since: DateTime<Utc>,
@@ -191,11 +306,9 @@ fn scan_file(
     active: &[usize],
     st: &mut RootStats,
 ) -> io::Result<()> {
-    let mut lines = Lines {
-        reader: BufReader::new(File::open(path)?),
-        buf: Vec::new(),
-    };
+    let mut lines = Lines::new(reader);
     let Some(first) = lines.next_line()? else {
+        st.bad_lines += lines.over_long;
         return Ok(());
     };
     let first = first.trim_start_matches('\u{feff}').trim_end().to_owned();
@@ -225,6 +338,7 @@ fn scan_file(
             Err(e) => break Err(e),
         }
     };
+    feed.st.bad_lines += lines.over_long;
     for &i in active {
         feed.dets[i].end(&session);
     }
@@ -327,5 +441,31 @@ mod tests {
         let claude = r#"{"type":"user","message":{"content":"a \"timestamp\":\"x\""},"timestamp":"2026-11-08T02:00:00Z"}"#;
         assert_eq!(raw_timestamp(claude), parse_ts("2026-11-08T02:00:00Z"));
         assert_eq!(raw_timestamp(r#"{"type":"summary"}"#), None);
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_cap_is_read() {
+        let record = format!("{{\"a\":\"{}\"}}", "a".repeat(MAX_LINE as usize - 8));
+        assert_eq!(record.len() as u64, MAX_LINE);
+        // At the end of the file, and before a newline and another line.
+        for rest in [&b""[..], b"\n{}"] {
+            let bytes = [record.as_bytes(), rest].concat();
+            let mut lines = Lines::new(Box::new(io::Cursor::new(bytes)));
+            let first = lines.next_line().expect("read").map(|l| l.len() as u64);
+            assert_eq!((first, lines.over_long), (Some(MAX_LINE), 0), "{rest:?}");
+            let next = lines.next_line().expect("read").map(Cow::into_owned);
+            assert_eq!(next.as_deref(), (!rest.is_empty()).then_some("{}"));
+        }
+    }
+
+    #[test]
+    fn a_line_over_the_cap_is_skipped_and_counted() {
+        let long = io::repeat(b'a').take(MAX_LINE + 10);
+        let rest: &[u8] = b"\n{\"a\":1}\n";
+        let mut lines = Lines::new(Box::new(BufReader::new(long.chain(rest))));
+        let next = lines.next_line().expect("read").map(Cow::into_owned);
+        assert_eq!(next.as_deref(), Some("{\"a\":1}\n"));
+        assert_eq!(lines.over_long, 1);
+        assert!(lines.next_line().expect("read").is_none());
     }
 }
