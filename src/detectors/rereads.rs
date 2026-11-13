@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, EST_NOTE, est_tokens, codex_call, codex_call_line, codex_output, input_str, name_of, result_chars,
-    tool_results, tool_uses,
+    CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens, input_str,
+    name_of, result_chars, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -31,7 +31,7 @@ pub struct Rereads {
     /// yet.
     awaited: HashSet<String>,
     /// Codex `exec` calls that re-read and whose output has not been read yet.
-    codex: CodexCalls,
+    codex: CodexCalls<()>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
 }
@@ -100,8 +100,9 @@ impl Detector for Rereads {
                     for path in from_commands.chain(call.reads.iter().cloned()) {
                         reread |= self.read(s, &path, r.in_window);
                     }
-                    if reread && call.exec {
-                        self.codex.call(call.call_id, 0, r.in_window);
+                    if call.exec {
+                        self.codex
+                            .call(&call.call_id, reread.then(Vec::new), r.in_window);
                     }
                 } else if let Some(out) = codex_output(r)
                     && self.codex.take(&out)
@@ -168,7 +169,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id or whose output never came.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }

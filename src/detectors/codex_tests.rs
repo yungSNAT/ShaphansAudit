@@ -196,14 +196,106 @@ fn an_output_that_never_comes_is_unpaired() {
 }
 
 #[test]
-fn a_reused_call_id_leaves_the_earlier_call_unpaired() {
+fn a_call_id_carried_by_2_waiting_calls_pairs_with_neither() {
+    // Both calls are issued before either output, so which output is whose is unknown.
     let git = commands(&["git status"]);
     let lines = in_window(&[
         exec("a", &git),
         exec("a", &git),
         output("a", &[(0, json!("ok"))]),
+        output("a", &[(1, json!("failed"))]),
     ]);
-    assert_eq!(polls(&lines), (counts(1, 0, 2), json!(1)));
+    assert_eq!(polls(&lines), (counts(1, 0, 0), json!(2)));
+
+    let mut d = Pipes::default();
+    let test = commands(&["cargo test 2>&1 | tail -1"]);
+    replay(
+        &mut d,
+        &in_window(&[
+            exec("a", &test),
+            exec("a", &test),
+            output("a", &[(0, json!("x"))]),
+            output("a", &[(0, json!("y"))]),
+        ]),
+    );
+    assert_eq!(summary(&d, "unguarded"), 2);
+    assert_eq!(summary(&d, "unguarded_results_found"), 0);
+    assert_eq!(summary(&d, "codex_outputs_not_paired"), 2);
+
+    let mut d = Rereads::default();
+    let read = |path: &str| format!("const t = readFile('{path}'); text(t);");
+    replay(
+        &mut d,
+        &in_window(&[
+            exec("r", &read("/work/y.md")),
+            exec("s", &read("/work/z.md")),
+            compacted(),
+            exec("a", &read("/work/y.md")),
+            exec("a", &read("/work/z.md")),
+            output("a", &[(0, json!("y"))]),
+            output("a", &[(0, json!("z"))]),
+        ]),
+    );
+    assert_eq!(
+        first_row(&d, &["rereads", "reread_chars"]),
+        vec![json!(2), json!(0)]
+    );
+    assert_eq!(summary(&d, "codex_outputs_not_paired"), 2);
+}
+
+#[test]
+fn a_call_id_reused_after_its_output_is_not_paired_again() {
+    let git = commands(&["git status"]);
+    let lines = in_window(&[
+        exec("a", &git),
+        output("a", &[(1, json!("e"))]),
+        exec("a", &git),
+        output("a", &[(0, json!("ok"))]),
+        exec("b", &git),
+        output("b", &[(0, json!("ok"))]),
+    ]);
+    // The second run follows the failure, but its result is not read, so the third
+    // follows a run whose result is unknown.
+    assert_eq!(polls(&lines), (counts(2, 1, 2), json!(1)));
+}
+
+#[test]
+fn a_run_whose_output_never_comes_hides_an_earlier_failure() {
+    let git = commands(&["git status"]);
+    // Before the window: a failure, then a repeat whose output never comes.
+    let lines = [
+        (false, exec("a", &git)),
+        (false, output("a", &[(1, json!("e"))])),
+        (false, exec("b", &git)),
+        (true, exec("c", &git)),
+        (true, output("c", &[(0, json!("ok"))])),
+    ];
+    assert_eq!(polls(&lines), (counts(1, 0, 2), json!(0)));
+
+    // In the window: the repeat follows the failure, but the next poll does not.
+    let lines = in_window(&[
+        exec("a", &git),
+        output("a", &[(1, json!("e"))]),
+        exec("b", &git),
+        exec("c", &git),
+        output("c", &[(0, json!("ok"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(2, 1, 2), json!(1)));
+}
+
+#[test]
+fn a_result_read_after_a_later_run_passed_sets_no_failure() {
+    let git = commands(&["git status"]);
+    let lines = in_window(&[
+        exec("a", &git),
+        exec("b", &git),
+        output("b", &[(0, json!("ok"))]),
+        output("a", &[(1, json!("e"))]),
+        exec("c", &git),
+        output("c", &[(0, json!("ok"))]),
+    ]);
+    // b, the latest run before c, passed; a's failure came later but is older.
+    assert_eq!(polls(&lines), (counts(2, 0, 4), json!(0)));
 }
 
 #[test]

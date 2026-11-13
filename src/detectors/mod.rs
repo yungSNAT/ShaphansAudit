@@ -10,7 +10,7 @@ pub mod startup;
 #[cfg(test)]
 mod codex_tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use serde_json::Value;
@@ -274,25 +274,47 @@ fn command_result(text: &str) -> Option<CommandResult> {
     })
 }
 
-/// Codex `exec` calls whose output a detector awaits, and how many in the window
-/// could not be paired with their results: calls without an id, calls whose output
-/// never came, and outputs that did not print one result per command.
-#[derive(Default)]
-pub struct CodexCalls {
-    /// By call id: how many commands the call ran and whether it was in the window.
-    waiting: HashMap<String, (usize, bool)>,
+/// Codex `exec` calls whose output a detector awaits, each with what the detector
+/// keeps for each of its commands, and how many in the window could not be paired
+/// with their results: calls without an id, calls whose id another `exec` call in
+/// the session also carries, calls whose output never came, and outputs that did not
+/// print one result per command.
+pub struct CodexCalls<T> {
+    /// The ids of the session's `exec` calls so far.
+    seen: HashSet<String>,
+    /// By call id: what the detector keeps for each command, and whether the call was
+    /// in the window.
+    waiting: HashMap<String, (Vec<T>, bool)>,
     pub unpaired: u64,
 }
 
-impl CodexCalls {
-    /// Awaits the output of an `exec` call that ran `commands` commands. A call that
-    /// reuses the id of one still waiting takes its place, and the earlier call is
-    /// never paired.
-    pub fn call(&mut self, call_id: String, commands: usize, in_window: bool) {
-        if call_id.is_empty() {
-            self.unpaired += u64::from(in_window);
-        } else if let Some((_, earlier)) = self.waiting.insert(call_id, (commands, in_window)) {
+impl<T> Default for CodexCalls<T> {
+    fn default() -> Self {
+        Self {
+            seen: HashSet::new(),
+            waiting: HashMap::new(),
+            unpaired: 0,
+        }
+    }
+}
+
+impl<T> CodexCalls<T> {
+    /// Notes an `exec` call, which every detector reading outputs must do for every
+    /// call so that a reused id is seen. `runs` holds what the detector keeps for
+    /// each command, by position, or is `None` when it awaits none of the output. An
+    /// id carried by more than one call pairs with neither from then on, as their
+    /// outputs cannot be told apart.
+    pub fn call(&mut self, call_id: &str, runs: Option<Vec<T>>, in_window: bool) {
+        let fresh = !call_id.is_empty() && self.seen.insert(call_id.to_owned());
+        if !fresh && let Some((_, earlier)) = self.waiting.remove(call_id) {
             self.unpaired += u64::from(earlier);
+        }
+        match runs {
+            Some(runs) if fresh => {
+                self.waiting.insert(call_id.to_owned(), (runs, in_window));
+            }
+            Some(_) => self.unpaired += u64::from(in_window),
+            None => {}
         }
     }
 
@@ -308,29 +330,26 @@ impl CodexCalls {
         self.waiting.remove(&out.call_id).is_some()
     }
 
-    /// For an awaited call's output: how many commands the call ran, and their
-    /// results by position when the cell printed one result per command. Otherwise
-    /// the results are empty, as which belongs to which command is unknown.
-    pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Option<(usize, &'o [CommandResult])> {
-        let (commands, in_window) = self.waiting.remove(&out.call_id)?;
-        if out.results.len() == commands {
-            return Some((commands, &out.results));
+    /// For an awaited call's output: what the detector kept for each command, with
+    /// that command's result, when the cell printed one result per command. Otherwise
+    /// none, as which result belongs to which command is unknown.
+    pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Vec<(T, &'o CommandResult)> {
+        let Some((runs, in_window)) = self.waiting.remove(&out.call_id) else {
+            return Vec::new();
+        };
+        if runs.len() != out.results.len() {
+            self.unpaired += u64::from(in_window);
+            return Vec::new();
         }
-        self.unpaired += u64::from(in_window);
-        Some((commands, &[]))
+        runs.into_iter().zip(&out.results).collect()
     }
 
     /// Ends a session: the calls still awaiting output never get it.
     pub fn end(&mut self) {
         let in_window = self.waiting.drain().filter(|(_, (_, w))| *w).count();
         self.unpaired += in_window as u64;
+        self.seen.clear();
     }
-}
-
-/// The key a Codex command's result is awaited under: its call and position.
-#[must_use]
-pub fn codex_key(call_id: &str, index: usize) -> String {
-    format!("{call_id}#{index}")
 }
 
 /// A `cmd` argument as one command line; `[shell, flag, script]` gives the script.

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, codex_call, codex_call_line, codex_key, codex_output, input_str, name_of, text_of,
+    CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, text_of,
     tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table};
@@ -48,10 +48,11 @@ impl Counts {
 /// Counts of test runs piped into `tail` or `head`.
 #[derive(Default)]
 pub struct Pipes {
-    /// Unguarded runs by Claude `tool_use` id or by `codex_key`.
+    /// Unguarded Claude runs by `tool_use` id.
     pending: HashSet<String>,
-    /// Codex `exec` calls with an unguarded test run whose output has not been read.
-    codex: CodexCalls,
+    /// Codex `exec` calls with an unguarded test run whose output has not been read,
+    /// with whether each command is one.
+    codex: CodexCalls<bool>,
     n: Counts,
     by_agent: BTreeMap<Agent, Counts>,
 }
@@ -83,9 +84,12 @@ impl Detector for Pipes {
         match s.agent {
             Agent::Claude => {
                 for b in tool_uses(r).filter(|b| name_of(b) == "Bash") {
-                    if r.in_window {
-                        let id = b.get("id").and_then(Value::as_str).unwrap_or("");
-                        self.command(s.agent, input_str(b, "command").unwrap_or(""), id);
+                    let id = b.get("id").and_then(Value::as_str).unwrap_or("");
+                    if r.in_window
+                        && self.command(s.agent, input_str(b, "command").unwrap_or(""))
+                        && !id.is_empty()
+                    {
+                        self.pending.insert(id.to_owned());
                     }
                 }
                 for b in tool_results(r) {
@@ -132,7 +136,7 @@ impl Detector for Pipes {
                     .to_owned(),
                 "Fix: set -o pipefail before the pipe, or keep the runner's own exit status."
                     .to_owned(),
-                "A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
+                "A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
                     .to_owned(),
             ],
         }
@@ -146,9 +150,8 @@ impl Pipes {
         f(self.by_agent.entry(agent).or_default());
     }
 
-    /// Judges one command and says whether it is an unguarded test run, which awaits
-    /// its result under `id` unless `id` is "".
-    fn command(&mut self, agent: Agent, cmd: &str, id: &str) -> bool {
+    /// Judges one command and says whether it is an unguarded test run.
+    fn command(&mut self, agent: Agent, cmd: &str) -> bool {
         let check = pipe_check(cmd);
         if !check.runner {
             return false;
@@ -164,9 +167,6 @@ impl Pipes {
             self.add(agent, |c| c.guarded += 1);
         } else {
             self.add(agent, |c| c.unguarded += 1);
-            if !id.is_empty() {
-                self.pending.insert(id.to_owned());
-            }
             return true;
         }
         false
@@ -175,32 +175,18 @@ impl Pipes {
     /// Reads a Codex call's commands, or the results of its unguarded test runs.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
         if let Some(call) = codex_call(r) {
-            if !r.in_window {
-                return;
+            let unguarded: Vec<bool> = if r.in_window {
+                call.commands().map(|c| self.command(s.agent, c)).collect()
+            } else {
+                Vec::new()
+            };
+            if call.exec {
+                let runs = unguarded.contains(&true).then_some(unguarded);
+                self.codex.call(&call.call_id, runs, r.in_window);
             }
-            let awaits = call.exec && !call.call_id.is_empty();
-            let mut commands = 0;
-            let mut unguarded = false;
-            for (index, cmd) in call.commands().enumerate() {
-                let key = if awaits {
-                    codex_key(&call.call_id, index)
-                } else {
-                    String::new()
-                };
-                unguarded |= self.command(s.agent, cmd, &key);
-                commands = index + 1;
-            }
-            if unguarded && call.exec {
-                self.codex.call(call.call_id, commands, true);
-            }
-        } else if let Some(out) = codex_output(r)
-            && let Some((commands, results)) = self.codex.pair(&out)
-        {
-            for index in 0..commands {
-                let key = codex_key(&out.call_id, index);
-                if self.pending.remove(&key)
-                    && let Some(res) = results.get(index)
-                {
+        } else if let Some(out) = codex_output(r) {
+            for (unguarded, res) in self.codex.pair(&out) {
+                if unguarded {
                     self.result(s.agent, &res.output, res.exit_code == 0);
                 }
             }
