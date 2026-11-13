@@ -129,6 +129,36 @@ fn startup_measures_main_sessions_started_in_the_window() {
 }
 
 #[test]
+fn startup_tokens_skip_synthetic_replies_and_unusable_usage() {
+    // 5 sessions: first replies recording 100, 300 and (after a synthetic reply and an
+    // instruction file) 200 input tokens, one recording none and one whose sum
+    // overflows.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/startup-tokens");
+    let (code, stdout, stderr) = run(&[
+        "startup",
+        "--agent",
+        "claude",
+        "--claude-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let s = &doc["detectors"]["startup"]["summary"];
+    assert_eq!(s["sessions"], 5);
+    assert_eq!(s["sessions_with_request_tokens"], 3);
+    assert_eq!(s["median_first_request_tokens"], 200);
+    let file = find(
+        rows(&doc, "startup", 0),
+        &[("piece", json!("file: /t/CLAUDE.md"))],
+    );
+    assert_eq!(file["median_chars"], 8);
+}
+
+#[test]
 fn startup_alone_stops_reading_at_the_first_reply() {
     // The main session ends in a cut line long after its first reply.
     assert_eq!(report("startup", &[])["roots"][0]["lines_skipped"], 0);

@@ -78,7 +78,7 @@ impl Detector for Startup {
                 .map(str::to_owned);
         }
         match r.kind() {
-            "assistant" if !cur.replied => {
+            "assistant" if !cur.replied && !synthetic(r.value) => {
                 cur.replied = true;
                 cur.first_tokens = input_tokens(r.value);
             }
@@ -221,20 +221,20 @@ fn add_attachment(pieces: &mut BTreeMap<String, u64>, a: &Value, programs: &Prog
     }
 }
 
-/// A reply's recorded input tokens: new, cache writes and cache reads. A reply that
-/// Claude Code made up itself, such as an error, has model `<synthetic>` and no request.
+/// True for a reply that Claude Code made up itself, such as an error notice: it has
+/// model `<synthetic>` and no request, so it is not the session's first reply.
+fn synthetic(reply: &Value) -> bool {
+    reply.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+}
+
+/// A reply's recorded input tokens: new, cache writes and cache reads, or none when
+/// they are missing or their sum overflows.
 fn input_tokens(reply: &Value) -> Option<u64> {
-    let message = reply.get("message")?;
-    if message.get("model").and_then(Value::as_str) == Some("<synthetic>") {
-        return None;
-    }
-    let usage = message.get("usage")?;
+    let usage = reply.pointer("/message/usage")?;
     let field = |k: &str| usage.get(k).and_then(Value::as_u64);
-    Some(
-        field("input_tokens")?
-            + field("cache_creation_input_tokens").unwrap_or(0)
-            + field("cache_read_input_tokens").unwrap_or(0),
-    )
+    field("input_tokens")?
+        .checked_add(field("cache_creation_input_tokens").unwrap_or(0))?
+        .checked_add(field("cache_read_input_tokens").unwrap_or(0))
 }
 
 /// The elements of a JSON array, or none for any other value.
@@ -326,8 +326,12 @@ mod tests {
             input_tokens(&reply("claude-x", r#"{"output_tokens":7}"#)),
             None
         );
+        let max = u64::MAX;
         assert_eq!(
-            input_tokens(&reply("<synthetic>", r#"{"input_tokens":0}"#)),
+            input_tokens(&reply(
+                "claude-x",
+                &format!(r#"{{"input_tokens":{max},"cache_creation_input_tokens":1}}"#)
+            )),
             None
         );
     }
