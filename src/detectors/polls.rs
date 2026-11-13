@@ -6,8 +6,8 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    ClaudeCalls, CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output, est_tokens, input_str,
-    name_of, result_chars, tool_results, tool_uses,
+    ClaudeCalls, CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output,
+    est_tokens, input_str, name_of, result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -91,9 +91,7 @@ impl Detector for Polls {
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => {
-line.contains("\"tool_use\"") || self.claude.wants(line)
-            }
+            Agent::Claude => line.contains("\"tool_use\"") || self.claude.wants(line),
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }

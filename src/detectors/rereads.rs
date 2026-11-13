@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens, input_str,
-    name_of, result_chars, tool_results, tool_uses,
+    ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
+    input_str, name_of, result_chars, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -84,7 +84,10 @@ impl Detector for Rereads {
                     for path in claude_read_paths(b) {
                         reread |= self.read(s, &path, r.in_window);
                     }
-                    if reread && fresh && let Some(id) = id {
+                    if reread
+                        && fresh
+                        && let Some(id) = id
+                    {
                         self.claude.wait(id, ());
                     }
                 }
@@ -95,25 +98,7 @@ impl Detector for Rereads {
                     }
                 }
             }
-            Agent::Codex => {
-                if let Some(call) = codex_call(r) {
-                    let from_commands = call.commands().flat_map(read_targets);
-                    let mut reread = false;
-                    for path in from_commands.chain(call.reads.iter().cloned()) {
-                        reread |= self.read(s, &path, r.in_window);
-                    }
-                    if call.exec {
-                        self.codex
-                            .call(&call.call_id, reread.then(Vec::new), r.in_window);
-                    } else if reread {
-                        self.codex.not_paired(0, r.in_window);
-                    }
-                } else if let Some(out) = codex_output(r)
-                    && self.codex.take(&out)
-                {
-                    self.returned(s, out.chars);
-                }
-            }
+            Agent::Codex => self.codex(s, r),
         }
     }
 
@@ -181,6 +166,27 @@ impl Detector for Rereads {
 }
 
 impl Rereads {
+    /// Reads a Codex call's reads, or the output of a call that re-read.
+    fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        if let Some(call) = codex_call(r) {
+            let from_commands = call.commands().flat_map(read_targets);
+            let mut reread = false;
+            for path in from_commands.chain(call.reads.iter().cloned()) {
+                reread |= self.read(s, &path, r.in_window);
+            }
+            if call.exec {
+                self.codex
+                    .call(&call.call_id, reread.then(Vec::new), r.in_window);
+            } else if reread {
+                self.codex.not_paired(0, r.in_window);
+            }
+        } else if let Some(out) = codex_output(r)
+            && self.codex.take(&out)
+        {
+            self.returned(s, out.chars);
+        }
+    }
+
     fn boundary(&mut self, s: &Session, in_window: bool) {
         if in_window {
             self.compacted_in_window = true;

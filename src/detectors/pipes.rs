@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::{
-    ClaudeCalls, CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, text_of,
-    tool_results, tool_uses,
+    ClaudeCalls, CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of,
+    text_of, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -64,9 +64,7 @@ impl Detector for Pipes {
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => {
-line.contains("\"tool_use\"") || self.claude.wants(line)
-            }
+            Agent::Claude => line.contains("\"tool_use\"") || self.claude.wants(line),
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
