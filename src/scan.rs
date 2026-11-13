@@ -487,8 +487,16 @@ mod tests {
             let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
             let reader = Box::new(io::Cursor::new(lines.clone().into_bytes()));
             let path = Path::new("s.jsonl");
-            scan_file(reader, path, agent, DateTime::<Utc>::MIN_UTC, &mut dets, &[0], &mut st)
-                .expect("read");
+            scan_file(
+                reader,
+                path,
+                agent,
+                DateTime::<Utc>::MIN_UTC,
+                &mut dets,
+                &[0],
+                &mut st,
+            )
+            .expect("read");
             assert_eq!(n.get(), want, "{agent:?}");
         }
     }
