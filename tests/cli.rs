@@ -104,6 +104,8 @@ fn startup_measures_main_sessions_started_in_the_window() {
     assert_eq!(s["sessions"], 1);
     assert_eq!(s["entry_points"], "claude-desktop 1");
     assert_eq!(s["median_total_chars"], 230);
+    assert_eq!(s["sessions_with_request_tokens"], 1);
+    assert_eq!(s["median_first_request_tokens"], 4312);
     let r = rows(&doc, "startup", 0);
     for (piece, chars) in [
         ("tool schemas (loaded)", 121),
@@ -127,6 +129,36 @@ fn startup_measures_main_sessions_started_in_the_window() {
 }
 
 #[test]
+fn startup_tokens_skip_synthetic_replies_and_unusable_usage() {
+    // 5 sessions: first replies recording 100, 300 and (after a synthetic reply and an
+    // instruction file) 200 input tokens, one recording none and one whose sum
+    // overflows.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/startup-tokens");
+    let (code, stdout, stderr) = run(&[
+        "startup",
+        "--agent",
+        "claude",
+        "--claude-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let s = &doc["detectors"]["startup"]["summary"];
+    assert_eq!(s["sessions"], 5);
+    assert_eq!(s["sessions_with_request_tokens"], 3);
+    assert_eq!(s["median_first_request_tokens"], 200);
+    let file = find(
+        rows(&doc, "startup", 0),
+        &[("piece", json!("file: /t/CLAUDE.md"))],
+    );
+    assert_eq!(file["median_chars"], 8);
+}
+
+#[test]
 fn startup_alone_stops_reading_at_the_first_reply() {
     // The main session ends in a cut line long after its first reply.
     assert_eq!(report("startup", &[])["roots"][0]["lines_skipped"], 0);
@@ -144,8 +176,12 @@ fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let r = rows(&doc, "schemas", 0);
     assert_eq!(r[0]["tool"], "mcp__unused__*");
     assert_eq!(
-        (r[0]["idle_chars"].clone(), r[0]["sessions_called"].clone()),
-        (json!(28), json!(0))
+        (
+            r[0]["idle_chars"].clone(),
+            r[0]["idle_tokens_est"].clone(),
+            r[0]["sessions_called"].clone()
+        ),
+        (json!(28), json!(7), json!(0))
     );
     let browser = find(
         r,
@@ -234,6 +270,7 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         (
             row["polls_after_failure"].clone(),
             row["poll_chars"].clone(),
+            row["poll_tokens_est"].clone(),
         )
     };
     // `agent-heavy status` fails, is polled (17 characters back) and polled again after
@@ -243,16 +280,16 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         totals,
         &[("agent", json!("claude")), ("scope", json!("main"))],
     );
-    assert_eq!(cost(main), (json!(2), json!(37)));
+    assert_eq!(cost(main), (json!(2), json!(37), json!(10)));
     let sub = find(
         totals,
         &[("agent", json!("claude")), ("scope", json!("subagent"))],
     );
-    assert_eq!(cost(sub), (json!(0), json!(0)));
+    assert_eq!(cost(sub), (json!(0), json!(0), json!(0)));
     let verbs = rows(&doc, "polls", 1);
     for (verb, expected) in [
-        ("agent-heavy", (json!(1), json!(37))),
-        ("git", (json!(1), json!(0))),
+        ("agent-heavy", (json!(1), json!(37), json!(10))),
+        ("git", (json!(1), json!(0), json!(0))),
     ] {
         let row = find(verbs, &[("agent", json!("claude")), ("verb", json!(verb))]);
         assert_eq!(cost(row), expected, "{verb}");
@@ -264,7 +301,7 @@ fn polls_report_result_characters_and_repeats_of_a_failed_run() {
         .collect();
     assert!(!codex.is_empty());
     for row in codex {
-        for column in ["polls_after_failure", "poll_chars"] {
+        for column in ["polls_after_failure", "poll_chars", "poll_tokens_est"] {
             assert_eq!(row.get(column), Some(&Value::Null), "{column} in {row}");
         }
     }
@@ -337,12 +374,14 @@ fn rereads_count_files_read_again_after_compaction() {
     // The `Read` re-read returns 17 and 3 characters of text around an image, and the
     // `tail` re-read 13. The first reads and a second read since the compaction add none.
     assert_eq!(claude["reread_chars"], 33);
+    assert_eq!(claude["reread_tokens_est"], 9);
     let codex = find(r, &[("agent", json!("codex")), ("scope", json!("main"))]);
     assert_eq!(
         (codex["reads"].clone(), codex["rereads"].clone()),
         (json!(3), json!(1))
     );
     assert_eq!(codex.get("reread_chars"), Some(&Value::Null));
+    assert_eq!(codex.get("reread_tokens_est"), Some(&Value::Null));
     let paths = rows(&doc, "rereads", 1);
     let names: Vec<&str> = paths
         .iter()

@@ -5,9 +5,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use super::startup::loaded_tools;
-use super::{name_of, tool_uses};
+use super::{EST_NOTE, est_tokens, name_of, tool_uses};
 use crate::report::{Opts, Section, Table, median};
 use crate::scan::{Agent, Detector, Record, Session};
+
+const COLUMNS: [&str; 9] = [
+    "scope",
+    "tool",
+    "tools",
+    "sessions_loaded",
+    "sessions_called",
+    "calls",
+    "median_chars",
+    "idle_chars",
+    "idle_tokens_est",
+];
 
 #[derive(Default)]
 struct Current {
@@ -122,6 +134,7 @@ impl Detector for Schemas {
                         json!(g.calls),
                         json!(median(&g.chars)),
                         json!(g.idle_chars),
+                        json!(est_tokens(g.idle_chars)),
                     ],
                 )
             })
@@ -129,16 +142,7 @@ impl Detector for Schemas {
         rows.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
         let mut table = Table::new(
             "By tool or MCP server, most idle characters first",
-            vec![
-                "scope",
-                "tool",
-                "tools",
-                "sessions_loaded",
-                "sessions_called",
-                "calls",
-                "median_chars",
-                "idle_chars",
-            ],
+            COLUMNS.to_vec(),
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
@@ -152,6 +156,7 @@ impl Detector for Schemas {
             tables: vec![table],
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
+                EST_NOTE.to_owned(),
                 "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
             ],
         }

@@ -80,7 +80,7 @@ By hook name and command, most cancellations first
 
 | Command | Agents | Reports |
 |---|---|---|
-| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions |
+| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
 | `pipes` | Claude | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success |
 | `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit; for Claude, also the polls of a command whose last result was an error and the characters polls returned |
@@ -96,6 +96,8 @@ By hook name and command, most cancellations first
 | `--json` | off | Print one JSON object with `schema_version` 1 |
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
+
+Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total.
 
 Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 

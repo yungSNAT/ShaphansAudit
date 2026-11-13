@@ -18,6 +18,8 @@ struct Current {
     pieces: BTreeMap<String, u64>,
     started_in_window: Option<bool>,
     replied: bool,
+    /// Input tokens of the first reply's request, as Claude Code recorded them.
+    first_tokens: Option<u64>,
     shape_seen: bool,
     entrypoint: Option<String>,
 }
@@ -27,6 +29,7 @@ struct Current {
 pub struct Startup {
     cur: Current,
     totals: Vec<u64>,
+    first_tokens: Vec<u64>,
     pieces: BTreeMap<String, Vec<u64>>,
     entrypoints: BTreeMap<String, u64>,
     programs: Rc<Programs>,
@@ -75,7 +78,10 @@ impl Detector for Startup {
                 .map(str::to_owned);
         }
         match r.kind() {
-            "assistant" => cur.replied = true,
+            "assistant" if !cur.replied && !synthetic(r.value) => {
+                cur.replied = true;
+                cur.first_tokens = input_tokens(r.value);
+            }
             "attachment" if !cur.replied => {
                 if let Some(a) = r.value.get("attachment") {
                     add_attachment(&mut cur.pieces, a, &self.programs);
@@ -98,6 +104,7 @@ impl Detector for Startup {
             return;
         }
         self.totals.push(cur.pieces.values().sum());
+        self.first_tokens.extend(cur.first_tokens);
         for (k, v) in cur.pieces {
             self.pieces.entry(k).or_default().push(v);
         }
@@ -135,24 +142,40 @@ impl Detector for Startup {
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
+        Section {
+            name: "startup",
+            title: "loaded before the first reply of each main session (Claude)",
+            summary: self.summary(),
+            tables: vec![table],
+            notes: vec![
+                "Only sessions whose first attachment, request or reply falls in the window are measured.".to_owned(),
+                "First request tokens are the input tokens Claude Code recorded for the first reply, cached or not, over the sessions with request tokens; characters by source are not tokens.".to_owned(),
+            ],
+        }
+    }
+}
+
+impl Startup {
+    fn summary(&self) -> Vec<(String, Value)> {
         let entry: Vec<String> = self
             .entrypoints
             .iter()
             .map(|(k, v)| format!("{k} {v}"))
             .collect();
-        Section {
-            name: "startup",
-            title: "loaded before the first reply of each main session (Claude)",
-            summary: vec![
-                ("sessions".to_owned(), json!(self.totals.len())),
-                ("entry_points".to_owned(), json!(entry.join(", "))),
-                ("median_total_chars".to_owned(), json!(median(&self.totals))),
-            ],
-            tables: vec![table],
-            notes: vec![
-                "Only sessions whose first attachment, request or reply falls in the window are measured.".to_owned(),
-            ],
-        }
+        let tokens = &self.first_tokens;
+        vec![
+            ("sessions".to_owned(), json!(self.totals.len())),
+            ("entry_points".to_owned(), json!(entry.join(", "))),
+            ("median_total_chars".to_owned(), json!(median(&self.totals))),
+            (
+                "sessions_with_request_tokens".to_owned(),
+                json!(tokens.len()),
+            ),
+            (
+                "median_first_request_tokens".to_owned(),
+                json!((!tokens.is_empty()).then(|| median(tokens))),
+            ),
+        ]
     }
 }
 
@@ -196,6 +219,22 @@ fn add_attachment(pieces: &mut BTreeMap<String, u64>, a: &Value, programs: &Prog
         "environment" => add("environment".to_owned(), json_chars(field("snapshot"))),
         other => add(format!("attachment: {other}"), json_chars(a)),
     }
+}
+
+/// True for a reply that Claude Code made up itself, such as an error notice: it has
+/// model `<synthetic>` and no request, so it is not the session's first reply.
+fn synthetic(reply: &Value) -> bool {
+    reply.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+}
+
+/// A reply's recorded input tokens: new, cache writes and cache reads, or none when
+/// they are missing or their sum overflows.
+fn input_tokens(reply: &Value) -> Option<u64> {
+    let usage = reply.pointer("/message/usage")?;
+    let field = |k: &str| usage.get(k).and_then(Value::as_u64);
+    field("input_tokens")?
+        .checked_add(field("cache_creation_input_tokens").unwrap_or(0))?
+        .checked_add(field("cache_read_input_tokens").unwrap_or(0))
 }
 
 /// The elements of a JSON array, or none for any other value.
@@ -266,5 +305,34 @@ mod tests {
         d.end(&s);
         assert_eq!(d.totals, vec![0]);
         assert!(!d.pieces.contains_key("tool schemas (loaded)"));
+    }
+
+    #[test]
+    fn request_tokens_come_only_from_a_real_request() {
+        let reply = |model: &str, usage: &str| {
+            serde_json::from_str::<Value>(&format!(
+                r#"{{"type":"assistant","message":{{"model":"{model}","usage":{usage}}}}}"#
+            ))
+            .expect("valid JSON")
+        };
+        let full =
+            r#"{"input_tokens":2,"cache_creation_input_tokens":30,"cache_read_input_tokens":400}"#;
+        assert_eq!(input_tokens(&reply("claude-x", full)), Some(432));
+        assert_eq!(
+            input_tokens(&reply("claude-x", r#"{"input_tokens":7}"#)),
+            Some(7)
+        );
+        assert_eq!(
+            input_tokens(&reply("claude-x", r#"{"output_tokens":7}"#)),
+            None
+        );
+        let max = u64::MAX;
+        assert_eq!(
+            input_tokens(&reply(
+                "claude-x",
+                &format!(r#"{{"input_tokens":{max},"cache_creation_input_tokens":1}}"#)
+            )),
+            None
+        );
     }
 }
