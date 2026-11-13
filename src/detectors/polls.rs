@@ -1,6 +1,6 @@
 //! Commands repeated within a session, with or without a file edit in between.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use serde_json::{Value, json};
@@ -74,6 +74,8 @@ pub struct Polls {
     runs: u64,
     /// Claude runs by `tool_use` id.
     awaited: HashMap<String, Awaited>,
+    /// The ids of the session's Claude `tool_use` blocks so far.
+    claude_ids: HashSet<String>,
     /// Codex `exec` calls whose output has not been read yet, with each command's run.
     codex: CodexCalls<Option<Awaited>>,
     /// By command, its latest run's awaited result or failure. A command whose latest
@@ -104,6 +106,7 @@ impl Detector for Polls {
         self.last_seen.clear();
         self.edits = 0;
         self.awaited.clear();
+        self.claude_ids.clear();
         self.latest.clear();
     }
 
@@ -115,11 +118,17 @@ impl Detector for Polls {
         match s.agent {
             Agent::Claude => {
                 for b in tool_uses(r) {
+                    let id = b.get("id").and_then(Value::as_str);
+                    // An id carried by more than one block pairs with neither from
+                    // then on, as their results cannot be told apart.
+                    let fresh = id.is_some_and(|id| self.claude_ids.insert(id.to_owned()));
+                    if !fresh && let Some(id) = id {
+                        self.awaited.remove(id);
+                    }
                     let name = name_of(b);
                     if name == "Bash" {
-                        let id = b.get("id").and_then(Value::as_str);
                         let cmd = input_str(b, "command").unwrap_or("");
-                        if let Some(run) = self.observe(s, cmd, r.in_window, id.is_some())
+                        if let Some(run) = self.observe(s, cmd, r.in_window, fresh)
                             && let Some(id) = id
                         {
                             self.awaited.insert(id.to_owned(), run);
@@ -174,15 +183,21 @@ impl Detector for Polls {
         Section {
             name: "polls",
             title: "commands repeated exactly within a session",
-            summary: vec![(
-                "codex_outputs_not_paired".to_owned(),
-                json!(self.codex.unpaired),
-            )],
+            summary: vec![
+                (
+                    "codex_outputs_not_paired".to_owned(),
+                    json!(self.codex.unpaired),
+                ),
+                (
+                    "codex_commands_not_paired".to_owned(),
+                    json!(self.codex.unpaired_commands),
+                ),
+            ],
             tables: vec![totals, table],
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command.".to_owned(),
+                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command. Codex commands not paired counts their commands, whose results were not judged.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -316,30 +331,27 @@ mod tests {
         assert!(!d.wants(&s, &result("toolu_b")));
     }
 
-    #[test]
-    fn a_claude_run_whose_result_never_comes_hides_an_earlier_failure() {
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let call = |id: &str| {
-            format!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{{"command":"git status"}}}}]}}}}"#
-            )
-        };
-        let failure = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","is_error":true}]}}"#;
+    const CLAUDE: Session = Session {
+        agent: Agent::Claude,
+        subagent: false,
+    };
+
+    /// A Claude `tool_use` block running `git status` with id `id`.
+    fn call(id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{{"command":"git status"}}}}]}}}}"#
+        )
+    }
+
+    /// The main-scope totals after one Claude session of `lines`, all in the window.
+    fn claude_totals(lines: &[String]) -> Counts {
         let mut d = Polls::default();
-        d.begin(&s);
-        for line in [
-            call("toolu_a"),
-            failure.to_owned(),
-            call("toolu_b"),
-            call("toolu_c"),
-        ] {
-            if d.wants(&s, &line) {
-                let value: Value = serde_json::from_str(&line).expect("valid JSON");
+        d.begin(&CLAUDE);
+        for line in lines {
+            if d.wants(&CLAUDE, line) {
+                let value: Value = serde_json::from_str(line).expect("valid JSON");
                 d.record(
-                    &s,
+                    &CLAUDE,
                     &Record {
                         value: &value,
                         in_window: true,
@@ -347,9 +359,41 @@ mod tests {
                 );
             }
         }
-        d.end(&s);
-        let c = d.totals[&(Agent::Claude, "main")];
+        d.end(&CLAUDE);
+        d.totals[&(Agent::Claude, "main")]
+    }
+
+    #[test]
+    fn a_claude_run_whose_result_never_comes_hides_an_earlier_failure() {
+        let failure = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","is_error":true}]}}"#;
+        let c = claude_totals(&[
+            call("toolu_a"),
+            failure.to_owned(),
+            call("toolu_b"),
+            call("toolu_c"),
+        ]);
         // b follows the failure; c follows b, whose result never came.
         assert_eq!((c.polls, c.polls_after_failure), (2, 1));
+    }
+
+    #[test]
+    fn a_reused_claude_tool_use_id_pairs_with_neither_run() {
+        let result = |is_error: bool| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_a","is_error":{is_error},"content":"clean"}}]}}}}"#
+            )
+        };
+        // The repeat is a poll, but the one result may be the first run's, so its
+        // characters are not the poll's.
+        let c = claude_totals(&[call("toolu_a"), call("toolu_a"), result(false)]);
+        assert_eq!((c.polls, c.poll_chars), (1, 0));
+        // Nor does a failure read for the reused id mark the next run.
+        let c = claude_totals(&[
+            call("toolu_a"),
+            call("toolu_a"),
+            result(true),
+            call("toolu_b"),
+        ]);
+        assert_eq!((c.polls, c.polls_after_failure), (2, 0));
     }
 }

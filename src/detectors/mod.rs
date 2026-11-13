@@ -228,15 +228,18 @@ pub struct CommandResult {
     pub output: String,
 }
 
-/// Reads a Codex `exec` cell's output: a list of text items or one string, of which
-/// the texts that are JSON objects with an `exit_code` and an `output` are
-/// `exec_command` results; a null `output` is empty. Any other `output` holds no
-/// text.
+/// Reads a Codex `exec` cell's output: a list of text items or one string. In the
+/// texts that are JSON, the objects with an `exit_code` and an `output` are
+/// `exec_command` results, whether a text is one, as `text(await
+/// tools.exec_command(...))` prints it, or holds them in lists and objects, as a
+/// printed `Promise.allSettled` does; a null `output` is empty. Results keep the
+/// order printed. An object holding results under more than one key gives the
+/// output no results, as the parsed object does not keep its keys' order. Any other
+/// `output` holds no text.
 ///
-/// shortcut: results are found only where the cell prints a result object whole, as
-/// `text(await tools.exec_command(...))` does; a cell that prints parts of one, or
-/// none, gives no results. Reading the cell's code to follow each value would be the
-/// upgrade.
+/// shortcut: results are found only where the cell prints a result object whole; a
+/// cell that prints parts of one, such as its `output` alone, or none, gives no
+/// results. Reading the cell's code to follow each value would be the upgrade.
 #[must_use]
 pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
     if r.kind() != "response_item" {
@@ -254,15 +257,45 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
             .collect(),
         _ => Vec::new(),
     };
+    let mut results = Vec::new();
+    let ordered = texts.iter().all(|t| {
+        serde_json::from_str::<Value>(t).map_or(true, |v| collect_results(&v, &mut results))
+    });
+    if !ordered {
+        results.clear();
+    }
     Some(CodexOutput {
         call_id: p.get("call_id")?.as_str()?.to_owned(),
         chars: texts.iter().map(|t| chars(t)).sum(),
-        results: texts.iter().filter_map(|t| command_result(t)).collect(),
+        results,
     })
 }
 
-fn command_result(text: &str) -> Option<CommandResult> {
-    let v: Value = serde_json::from_str(text).ok()?;
+/// Adds the results in `v` to `out` in order, and gives false when their order is
+/// unknown: an object holds results under more than one key.
+fn collect_results(v: &Value, out: &mut Vec<CommandResult>) -> bool {
+    if let Some(r) = command_result(v) {
+        out.push(r);
+        return true;
+    }
+    match v {
+        Value::Array(items) => items.iter().all(|x| collect_results(x, out)),
+        Value::Object(map) => {
+            let mut keys_with_results = 0;
+            for x in map.values() {
+                let before = out.len();
+                if !collect_results(x, out) {
+                    return false;
+                }
+                keys_with_results += usize::from(out.len() > before);
+            }
+            keys_with_results <= 1
+        }
+        _ => true,
+    }
+}
+
+fn command_result(v: &Value) -> Option<CommandResult> {
     let output = match v.get("output")? {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -275,10 +308,10 @@ fn command_result(text: &str) -> Option<CommandResult> {
 }
 
 /// Codex `exec` calls whose output a detector awaits, each with what the detector
-/// keeps for each of its commands, and how many in the window could not be paired
-/// with their results: calls without an id, calls whose id another `exec` call in
-/// the session also carries, calls whose output never came, and outputs that did not
-/// print one result per command.
+/// keeps for each of its commands, and how many in the window, and how many of their
+/// commands, could not be paired with their results: calls without an id, calls
+/// whose id another `exec` call in the session also carries, calls whose output
+/// never came, and outputs that did not print one result per command.
 pub struct CodexCalls<T> {
     /// The ids of the session's `exec` calls so far.
     seen: HashSet<String>,
@@ -286,6 +319,8 @@ pub struct CodexCalls<T> {
     /// in the window.
     waiting: HashMap<String, (Vec<T>, bool)>,
     pub unpaired: u64,
+    /// The commands of the `unpaired` calls.
+    pub unpaired_commands: u64,
 }
 
 impl<T> Default for CodexCalls<T> {
@@ -294,6 +329,7 @@ impl<T> Default for CodexCalls<T> {
             seen: HashSet::new(),
             waiting: HashMap::new(),
             unpaired: 0,
+            unpaired_commands: 0,
         }
     }
 }
@@ -306,15 +342,23 @@ impl<T> CodexCalls<T> {
     /// outputs cannot be told apart.
     pub fn call(&mut self, call_id: &str, runs: Option<Vec<T>>, in_window: bool) {
         let fresh = !call_id.is_empty() && self.seen.insert(call_id.to_owned());
-        if !fresh && let Some((_, earlier)) = self.waiting.remove(call_id) {
-            self.unpaired += u64::from(earlier);
+        if !fresh && let Some((earlier, w)) = self.waiting.remove(call_id) {
+            self.not_paired(earlier.len(), w);
         }
         match runs {
             Some(runs) if fresh => {
                 self.waiting.insert(call_id.to_owned(), (runs, in_window));
             }
-            Some(_) => self.unpaired += u64::from(in_window),
+            Some(runs) => self.not_paired(runs.len(), in_window),
             None => {}
+        }
+    }
+
+    /// Counts a call of `commands` commands that will not be paired, if in the window.
+    fn not_paired(&mut self, commands: usize, in_window: bool) {
+        if in_window {
+            self.unpaired += 1;
+            self.unpaired_commands += commands as u64;
         }
     }
 
@@ -338,7 +382,7 @@ impl<T> CodexCalls<T> {
             return Vec::new();
         };
         if runs.len() != out.results.len() {
-            self.unpaired += u64::from(in_window);
+            self.not_paired(runs.len(), in_window);
             return Vec::new();
         }
         runs.into_iter().zip(&out.results).collect()
@@ -346,8 +390,9 @@ impl<T> CodexCalls<T> {
 
     /// Ends a session: the calls still awaiting output never get it.
     pub fn end(&mut self) {
-        let in_window = self.waiting.drain().filter(|(_, (_, w))| *w).count();
-        self.unpaired += in_window as u64;
+        for (_, (runs, in_window)) in std::mem::take(&mut self.waiting) {
+            self.not_paired(runs.len(), in_window);
+        }
         self.seen.clear();
     }
 }
