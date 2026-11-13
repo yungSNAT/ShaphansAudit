@@ -49,7 +49,7 @@ From a clone, this runs it on the synthetic test transcripts:
 shaphan all --since 2026-11-01 --claude-root tests/fixtures/claude --codex-root tests/fixtures/codex
 ```
 
-Part of its output, with the `startup`, `schemas`, `polls` and `rereads` sections left out:
+Part of its output on a machine without `rtk`, with the `startup`, `schemas`, `polls` and `rereads` sections left out (hook labels name only programs found on your machine):
 
 ```text
 shaphan 0.1.0: records since 2026-11-01 00:00 +11:00
@@ -73,7 +73,7 @@ Note: Fix: set -o pipefail before the pipe, or keep the runner's own exit status
 
 By hook name and command, most cancellations first
   hook name             hook           runs  cancelled  timed out  errors  median ms  p90 ms  max ms  median output chars
-  PreToolUse:Bash       rtk               1          1          1       0      15000   15000   15000                    -
+  PreToolUse:Bash       (other)           1          1          1       0      15000   15000   15000                    -
   SessionStart:startup  hub-digest.js     1          0          0       0        120     120     120                   19
   PreToolUse:Bash       guard.exe         1          0          0       0         40      40      40                    0
 ```
