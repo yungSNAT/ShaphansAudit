@@ -70,7 +70,7 @@ enum Latest {
 pub struct Polls {
     last_seen: HashMap<String, u64>,
     edits: u64,
-    /// The runs seen so far, which number each run.
+    /// The runs awaited so far, which number each one.
     runs: u64,
     /// Claude runs by `tool_use` id.
     awaited: HashMap<String, Awaited>,
