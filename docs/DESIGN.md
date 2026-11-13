@@ -8,7 +8,7 @@ Leave usage and cost totals to [ccusage](https://github.com/ryoppippi/ccusage); 
 
 | Subcommand | Agents | Reports |
 |---|---|---|
-| `startup` | Claude | Characters loaded before the first reply of each main session, by source: instruction files, hook output, skill and agent listings, tool schemas, MCP instructions and other attachments; also the input tokens Claude Code recorded for that first reply |
+| `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, skill and agent listings, tool schemas, MCP instructions and other attachments; also the input tokens Claude Code recorded for that first reply |
 | `schemas` | Claude | Per tool, or per MCP server: sessions whose requests loaded its schema, sessions that called it, and the characters loaded in sessions that never called it. A tool only ever sent with `defer_loading` gets no row: its schema enters context through ToolSearch results, which v0.1 does not measure |
 | `pipes` | Claude | Test runs piped straight into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many of those printed a failure whilst the call reported success |
 | `polls` | Claude, Codex | Commands repeated exactly within a session, split into repeats with no file edit since the previous run (polls) and reruns after an edit; for Claude, also the polls of a command whose last result was an error and the characters polls returned |
