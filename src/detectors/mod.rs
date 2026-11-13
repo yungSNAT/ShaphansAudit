@@ -435,10 +435,11 @@ impl<T> Default for ClaudeCalls<T> {
 impl<T> ClaudeCalls<T> {
     /// Notes a `tool_use` block, which a detector reading results must do for every
     /// block so that a reused id is seen, and says whether its result can be
-    /// awaited: it has an id that no earlier block in the session carried. An id
+    /// awaited: it has a non-empty id that no earlier block in the session carried. An id
     /// carried by more than one block pairs with neither from then on, as their
     /// results cannot be told apart.
     pub fn note(&mut self, id: Option<&str>) -> bool {
+        let id = id.filter(|id| !id.is_empty());
         let fresh = id.is_some_and(|id| self.seen.insert(id.to_owned()));
         if !fresh && let Some(id) = id {
             self.awaited.remove(id);
@@ -535,6 +536,15 @@ fn function_command(cmd: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_empty_or_missing_claude_id_is_never_awaited() {
+        let mut calls = ClaudeCalls::<()>::default();
+        assert!(!calls.note(None));
+        assert!(!calls.note(Some("")));
+        assert!(calls.note(Some("toolu_a")));
+        assert!(!calls.note(Some("toolu_a")));
+    }
 
     #[test]
     fn function_command_takes_the_script_after_the_shell_flag() {
