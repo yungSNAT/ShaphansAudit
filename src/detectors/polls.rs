@@ -80,7 +80,8 @@ impl Detector for Polls {
         match s.agent {
             Agent::Claude => {
                 line.contains("\"tool_use\"")
-                    || (!self.awaited.is_empty() && line.contains("\"tool_result\""))
+                    || (line.contains("\"tool_result\"")
+                        && self.awaited.keys().any(|id| line.contains(id.as_str())))
             }
             Agent::Codex => {
                 codex_call_line(line)
@@ -270,5 +271,27 @@ impl Polls {
         } else {
             self.failed.remove(&run.command);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_results_of_awaited_runs_are_parsed() {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Polls::default();
+        d.observe(&s, "git status", true, Some("toolu_a"));
+        let result = |id: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
+            )
+        };
+        assert!(d.wants(&s, &result("toolu_a")));
+        assert!(!d.wants(&s, &result("toolu_b")));
     }
 }
