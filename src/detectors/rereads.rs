@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, codex_output, codex_output_line, input_str, name_of, result_chars,
+    CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, result_chars,
     tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table, display_path, ratio};
@@ -27,9 +27,11 @@ pub struct Rereads {
     before: HashSet<String>,
     current: HashSet<String>,
     compacted_in_window: bool,
-    /// Claude `tool_use` ids or Codex call ids of calls that re-read and whose result
-    /// has not been read yet.
+    /// Claude `tool_use` ids of calls that re-read and whose result has not been read
+    /// yet.
     awaited: HashSet<String>,
+    /// Codex `exec` calls that re-read and whose output has not been read yet.
+    codex: CodexCalls,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
 }
@@ -49,8 +51,7 @@ impl Detector for Rereads {
             Agent::Codex => {
                 line.contains("\"type\":\"compacted\"")
                     || codex_call_line(line)
-                    || (codex_output_line(line)
-                        && self.awaited.iter().any(|id| line.contains(id.as_str())))
+                    || self.codex.wants(line)
             }
         }
     }
@@ -87,9 +88,9 @@ impl Detector for Rereads {
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    self.returned(s, id, || {
-                        result_chars(b.get("content").unwrap_or(&Value::Null))
-                    });
+                    if self.awaited.remove(id) {
+                        self.returned(s, result_chars(b.get("content").unwrap_or(&Value::Null)));
+                    }
                 }
             }
             Agent::Codex => {
@@ -99,17 +100,20 @@ impl Detector for Rereads {
                     for path in from_commands.chain(call.reads.iter().cloned()) {
                         reread |= self.read(s, &path, r.in_window);
                     }
-                    if reread && call.exec && !call.call_id.is_empty() {
-                        self.awaited.insert(call.call_id);
+                    if reread && call.exec {
+                        self.codex.call(call.call_id, 0, r.in_window);
                     }
-                } else if let Some(out) = codex_output(r) {
-                    self.returned(s, &out.call_id, || out.chars);
+                } else if let Some(out) = codex_output(r)
+                    && self.codex.take(&out)
+                {
+                    self.returned(s, out.chars);
                 }
             }
         }
     }
 
     fn end(&mut self, s: &Session) {
+        self.codex.end();
         if self.compacted_in_window {
             self.totals
                 .entry((s.agent, s.scope()))
@@ -154,12 +158,15 @@ impl Detector for Rereads {
         Section {
             name: "rereads",
             title: "files read again after a context compaction",
-            summary: Vec::new(),
+            summary: vec![(
+                "codex_outputs_not_paired".to_owned(),
+                json!(self.codex.unpaired),
+            )],
             tables,
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed.".to_owned(),
+                "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the exec cells in the window that re-read but had no call id or whose output never came.".to_owned(),
             ],
         }
     }
@@ -178,14 +185,12 @@ impl Rereads {
         self.before.extend(current);
     }
 
-    /// Adds the size of call `id`'s result when the call re-read.
-    fn returned(&mut self, s: &Session, id: &str, size: impl FnOnce() -> u64) {
-        if self.awaited.remove(id) {
-            self.totals
-                .entry((s.agent, s.scope()))
-                .or_default()
-                .reread_chars += size();
-        }
+    /// Adds the size of the result of a call that re-read.
+    fn returned(&mut self, s: &Session, size: u64) {
+        self.totals
+            .entry((s.agent, s.scope()))
+            .or_default()
+            .reread_chars += size;
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.

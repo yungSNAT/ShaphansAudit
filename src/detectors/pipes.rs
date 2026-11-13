@@ -1,13 +1,13 @@
 //! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash and
 //! Codex commands).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Value, json};
 
 use super::{
-    codex_call, codex_call_line, codex_key, codex_output, codex_output_line, input_str, name_of,
-    paired, text_of, tool_results, tool_uses,
+    CodexCalls, codex_call, codex_call_line, codex_key, codex_output, input_str, name_of, text_of,
+    tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -50,11 +50,8 @@ impl Counts {
 pub struct Pipes {
     /// Unguarded runs by Claude `tool_use` id or by `codex_key`.
     pending: HashSet<String>,
-    /// Codex `exec` calls with an unguarded test run whose output has not been read
-    /// yet, with how many commands each ran.
-    codex_calls: HashMap<String, usize>,
-    /// Codex outputs of those calls whose results could not be paired with commands.
-    codex_unpaired: u64,
+    /// Codex `exec` calls with an unguarded test run whose output has not been read.
+    codex: CodexCalls,
     n: Counts,
     by_agent: BTreeMap<Agent, Counts>,
 }
@@ -70,17 +67,16 @@ impl Detector for Pipes {
                 line.contains("\"Bash\"")
                     || (!self.pending.is_empty() && line.contains("\"tool_result\""))
             }
-            Agent::Codex => {
-                codex_call_line(line)
-                    || (codex_output_line(line)
-                        && self.codex_calls.keys().any(|id| line.contains(id.as_str())))
-            }
+            Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
 
     fn begin(&mut self, _s: &Session) {
         self.pending.clear();
-        self.codex_calls.clear();
+    }
+
+    fn end(&mut self, _s: &Session) {
+        self.codex.end();
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -127,7 +123,7 @@ impl Detector for Pipes {
                 .map(|(k, v)| ((*k).to_owned(), json!(v)))
                 .chain(std::iter::once((
                     "codex_outputs_not_paired".to_owned(),
-                    json!(self.codex_unpaired),
+                    json!(self.codex.unpaired),
                 )))
                 .collect(),
             tables: vec![table],
@@ -136,7 +132,7 @@ impl Detector for Pipes {
                     .to_owned(),
                 "Fix: set -o pipefail before the pipe, or keep the runner's own exit status."
                     .to_owned(),
-                "A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
+                "A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
                     .to_owned(),
             ],
         }
@@ -150,8 +146,8 @@ impl Pipes {
         f(self.by_agent.entry(agent).or_default());
     }
 
-    /// Judges one command; an unguarded test run awaits its result under `id`, and
-    /// says so.
+    /// Judges one command and says whether it is an unguarded test run, which awaits
+    /// its result under `id` unless `id` is "".
     fn command(&mut self, agent: Agent, cmd: &str, id: &str) -> bool {
         let check = pipe_check(cmd);
         if !check.runner {
@@ -170,8 +166,8 @@ impl Pipes {
             self.add(agent, |c| c.unguarded += 1);
             if !id.is_empty() {
                 self.pending.insert(id.to_owned());
-                return true;
             }
+            return true;
         }
         false
     }
@@ -184,26 +180,22 @@ impl Pipes {
             }
             let awaits = call.exec && !call.call_id.is_empty();
             let mut commands = 0;
-            let mut pending = false;
+            let mut unguarded = false;
             for (index, cmd) in call.commands().enumerate() {
                 let key = if awaits {
                     codex_key(&call.call_id, index)
                 } else {
                     String::new()
                 };
-                pending |= self.command(s.agent, cmd, &key);
+                unguarded |= self.command(s.agent, cmd, &key);
                 commands = index + 1;
             }
-            if pending {
-                self.codex_calls.insert(call.call_id, commands);
+            if unguarded && call.exec {
+                self.codex.call(call.call_id, commands, true);
             }
         } else if let Some(out) = codex_output(r)
-            && let Some(commands) = self.codex_calls.remove(&out.call_id)
+            && let Some((commands, results)) = self.codex.pair(&out)
         {
-            let results = paired(&out, commands);
-            if results.is_empty() {
-                self.codex_unpaired += 1;
-            }
             for index in 0..commands {
                 let key = codex_key(&out.call_id, index);
                 if self.pending.remove(&key)

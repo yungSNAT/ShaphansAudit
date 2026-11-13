@@ -73,7 +73,7 @@ By agent
   claude          5                        5                    1                                    1          3                        2                           2                                      1                            0
 Note: An unguarded pipe reports tail's or head's exit status, not the test runner's.
 Note: Fix: set -o pipefail before the pipe, or keep the runner's own exit status.
-Note: A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too.
+Note: A Codex result counts only when its exec cell printed one exec_command result per command; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too.
 
 == hooks: hook runs, cancellations and durations (Claude) ==
 

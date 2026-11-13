@@ -6,8 +6,8 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    chars, codex_call, codex_call_line, codex_key, codex_output, codex_output_line, input_str,
-    name_of, paired, result_chars, tool_results, tool_uses,
+    CodexCalls, chars, codex_call, codex_call_line, codex_key, codex_output, input_str, name_of,
+    result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -59,12 +59,10 @@ pub struct Polls {
     edits: u64,
     /// Runs by Claude `tool_use` id or by `codex_key`.
     awaited: HashMap<String, Awaited>,
-    /// Codex `exec` calls whose output has not been read yet: how many commands each
-    /// ran, and whether it was in the window.
-    codex_calls: HashMap<String, (usize, bool)>,
-    /// Codex outputs in the window whose results could not be paired with commands.
-    codex_unpaired: u64,
-    /// Commands whose last result read reported an error.
+    /// Codex `exec` calls whose output has not been read yet.
+    codex: CodexCalls,
+    /// Commands whose last result read reported an error, and whose later runs, if
+    /// any, have results that may yet be read.
     failed: HashSet<String>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     verbs: BTreeMap<(Agent, String), Counts>,
@@ -83,11 +81,7 @@ impl Detector for Polls {
                     || (line.contains("\"tool_result\"")
                         && self.awaited.keys().any(|id| line.contains(id.as_str())))
             }
-            Agent::Codex => {
-                codex_call_line(line)
-                    || (codex_output_line(line)
-                        && self.codex_calls.keys().any(|id| line.contains(id.as_str())))
-            }
+            Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
 
@@ -95,8 +89,11 @@ impl Detector for Polls {
         self.last_seen.clear();
         self.edits = 0;
         self.awaited.clear();
-        self.codex_calls.clear();
         self.failed.clear();
+    }
+
+    fn end(&mut self, _s: &Session) {
+        self.codex.end();
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -157,13 +154,13 @@ impl Detector for Polls {
             title: "commands repeated exactly within a session",
             summary: vec![(
                 "codex_outputs_not_paired".to_owned(),
-                json!(self.codex_unpaired),
+                json!(self.codex.unpaired),
             )],
             tables: vec![totals, table],
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired.".to_owned(),
+                "Polls after failure repeat a command whose last result was marked as an error, which a hook's denial also is, unless a run since has a result that cannot be read; poll chars are the characters of text in polls' results. A Codex result counts only when its exec cell printed one exec_command result per command; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the exec cells in the window whose results could not be paired: the cell had no call id, its output never came or it did not print one result per command.".to_owned(),
             ],
         }
     }
@@ -177,8 +174,8 @@ impl Polls {
         }
     }
 
-    /// Counts one run of a command. `id` is the Claude `tool_use` id that its result
-    /// will carry.
+    /// Counts one run of a command. `id` is the key its result will carry; a run
+    /// without one leaves the command's failure state unknown.
     fn observe(&mut self, s: &Session, cmd: &str, in_window: bool, id: Option<&str>) {
         let key = cmd.trim();
         if key.is_empty() {
@@ -206,38 +203,41 @@ impl Polls {
                 }
             }
         }
-        if let Some(id) = id {
-            let command = key.to_owned();
-            self.awaited
-                .insert(id.to_owned(), Awaited { command, poll });
+        let Some(id) = id else {
+            self.failed.remove(key);
+            return;
+        };
+        let command = key.to_owned();
+        if let Some(earlier) = self
+            .awaited
+            .insert(id.to_owned(), Awaited { command, poll })
+        {
+            // A reused id: the earlier run's result can no longer be told apart.
+            self.failed.remove(&earlier.command);
         }
     }
 
     /// Reads a Codex call's commands, or its output.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
         if let Some(call) = codex_call(r) {
+            let awaits = call.exec && !call.call_id.is_empty();
             let mut index = 0;
             for step in call.steps {
                 match step {
                     Step::Command(c) => {
-                        let key =
-                            (!call.call_id.is_empty()).then(|| codex_key(&call.call_id, index));
+                        let key = awaits.then(|| codex_key(&call.call_id, index));
                         self.observe(s, &c, r.in_window, key.as_deref());
                         index += 1;
                     }
                     Step::Edit => self.edits += 1,
                 }
             }
-            if call.exec && index > 0 && !call.call_id.is_empty() {
-                self.codex_calls.insert(call.call_id, (index, r.in_window));
+            if call.exec && index > 0 {
+                self.codex.call(call.call_id, index, r.in_window);
             }
         } else if let Some(out) = codex_output(r)
-            && let Some((commands, in_window)) = self.codex_calls.remove(&out.call_id)
+            && let Some((commands, results)) = self.codex.pair(&out)
         {
-            let results = paired(&out, commands);
-            if results.is_empty() && in_window {
-                self.codex_unpaired += 1;
-            }
             for index in 0..commands {
                 let key = codex_key(&out.call_id, index);
                 match results.get(index) {
@@ -245,7 +245,9 @@ impl Polls {
                         self.result(s, &key, res.exit_code != 0, || chars(&res.output));
                     }
                     None => {
-                        self.awaited.remove(&key);
+                        if let Some(run) = self.awaited.remove(&key) {
+                            self.failed.remove(&run.command);
+                        }
                     }
                 }
             }

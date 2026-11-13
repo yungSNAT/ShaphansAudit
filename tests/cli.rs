@@ -342,6 +342,52 @@ fn rereads_count_codex_output_characters() {
     );
 }
 
+#[test]
+fn codex_record_shapes_are_counted_or_reported_as_not_paired() {
+    // The key sets, item types and result shapes of real Codex rollouts, with
+    // synthetic values: null outputs, string outputs, images, missing call ids, a
+    // cell that prints only an exit code, and runs before and in the window.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-shapes");
+    let (code, stdout, stderr) = run(&[
+        "all",
+        "--codex-root",
+        root,
+        "--agent",
+        "codex",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let not_paired = |d: &str| doc["detectors"][d]["summary"]["codex_outputs_not_paired"].clone();
+
+    let polls = find(rows(&doc, "polls", 0), &[("scope", json!("main"))]);
+    let keys = ["commands", "polls", "polls_after_failure", "poll_chars"];
+    let got: Vec<Value> = keys.iter().map(|k| polls[*k].clone()).collect();
+    assert_eq!(got, [json!(9), json!(6), json!(1), json!(40)]);
+    assert_eq!(not_paired("polls"), 3);
+
+    let pipes = &doc["detectors"]["pipes"]["summary"];
+    for (key, n) in [
+        ("test_runs", 3),
+        ("unguarded", 3),
+        ("unguarded_results_found", 1),
+        ("showed_a_failure_but_reported_success", 1),
+    ] {
+        assert_eq!(pipes[key], n, "{key}");
+    }
+    assert_eq!(not_paired("pipes"), 2);
+
+    let rereads = find(rows(&doc, "rereads", 0), &[("scope", json!("main"))]);
+    assert_eq!(
+        (rereads["rereads"].clone(), rereads["reread_chars"].clone()),
+        (json!(1), json!(55))
+    );
+    assert_eq!(not_paired("rereads"), 0);
+}
+
 const RESULTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/results/claude");
 
 /// The main-scope row of a report over the result-pairing fixture.

@@ -7,6 +7,10 @@ pub mod rereads;
 pub mod schemas;
 pub mod startup;
 
+#[cfg(test)]
+mod codex_tests;
+
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use serde_json::Value;
@@ -212,15 +216,10 @@ pub struct CommandResult {
     pub output: String,
 }
 
-/// True for lines that may hold a Codex `exec` cell's output.
-#[must_use]
-pub fn codex_output_line(line: &str) -> bool {
-    line.contains("\"custom_tool_call_output\"")
-}
-
 /// Reads a Codex `exec` cell's output: a list of text items or one string, of which
 /// the texts that are JSON objects with an `exit_code` and an `output` are
-/// `exec_command` results. Any other `output` holds no text.
+/// `exec_command` results; a null `output` is empty. Any other `output` holds no
+/// text.
 ///
 /// shortcut: results are found only where the cell prints a result object whole, as
 /// `text(await tools.exec_command(...))` does; a cell that prints parts of one, or
@@ -252,20 +251,67 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
 
 fn command_result(text: &str) -> Option<CommandResult> {
     let v: Value = serde_json::from_str(text).ok()?;
+    let output = match v.get("output")? {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        _ => return None,
+    };
     Some(CommandResult {
         exit_code: v.get("exit_code")?.as_i64()?,
-        output: v.get("output")?.as_str()?.to_owned(),
+        output,
     })
 }
 
-/// The results of a call's commands, by position, when the cell printed one result
-/// per command; otherwise none, as which result belongs to which command is unknown.
-#[must_use]
-pub fn paired(out: &CodexOutput, commands: usize) -> &[CommandResult] {
-    if out.results.len() == commands {
-        &out.results
-    } else {
-        &[]
+/// Codex `exec` calls whose output a detector awaits, and how many in the window
+/// could not be paired with their results: calls without an id, calls whose output
+/// never came, and outputs that did not print one result per command.
+#[derive(Default)]
+pub struct CodexCalls {
+    /// By call id: how many commands the call ran and whether it was in the window.
+    waiting: HashMap<String, (usize, bool)>,
+    pub unpaired: u64,
+}
+
+impl CodexCalls {
+    /// Awaits the output of an `exec` call that ran `commands` commands. A call that
+    /// reuses the id of one still waiting takes its place, and the earlier call is
+    /// never paired.
+    pub fn call(&mut self, call_id: String, commands: usize, in_window: bool) {
+        if call_id.is_empty() {
+            self.unpaired += u64::from(in_window);
+        } else if let Some((_, earlier)) = self.waiting.insert(call_id, (commands, in_window)) {
+            self.unpaired += u64::from(earlier);
+        }
+    }
+
+    /// True for lines that may hold an awaited call's output.
+    #[must_use]
+    pub fn wants(&self, line: &str) -> bool {
+        line.contains("\"custom_tool_call_output\"")
+            && self.waiting.keys().any(|id| line.contains(id.as_str()))
+    }
+
+    /// Whether the output's call was awaited; it is awaited no longer.
+    pub fn take(&mut self, out: &CodexOutput) -> bool {
+        self.waiting.remove(&out.call_id).is_some()
+    }
+
+    /// For an awaited call's output: how many commands the call ran, and their
+    /// results by position when the cell printed one result per command. Otherwise
+    /// the results are empty, as which belongs to which command is unknown.
+    pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Option<(usize, &'o [CommandResult])> {
+        let (commands, in_window) = self.waiting.remove(&out.call_id)?;
+        if out.results.len() == commands {
+            return Some((commands, &out.results));
+        }
+        self.unpaired += u64::from(in_window);
+        Some((commands, &[]))
+    }
+
+    /// Ends a session: the calls still awaiting output never get it.
+    pub fn end(&mut self) {
+        let in_window = self.waiting.drain().filter(|(_, (_, w))| *w).count();
+        self.unpaired += in_window as u64;
     }
 }
 
