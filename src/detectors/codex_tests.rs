@@ -473,6 +473,21 @@ fn an_unpaired_run_before_the_window_clears_the_failure() {
 }
 
 #[test]
+fn a_blank_command_counts_as_a_command_and_as_not_paired() {
+    let lines = in_window(&[
+        exec("", &commands(&["", " "])),
+        exec("", &commands(&["git status", "  "])),
+    ]);
+    let mut d = Polls::default();
+    replay(&mut d, &lines);
+    assert_eq!(
+        first_row(&d, &["commands", "polls"]),
+        vec![json!(4), json!(0)]
+    );
+    assert_eq!(summary(&d, "codex_commands_not_paired"), 4);
+}
+
+#[test]
 fn function_call_commands_count_as_not_paired() {
     // Their outputs are not read, so their results are never judged.
     let patch = json!({"type": "response_item", "payload": {"type": "function_call", "name": "apply_patch", "arguments": "{}", "call_id": "p"}});

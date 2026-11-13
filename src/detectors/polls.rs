@@ -203,7 +203,8 @@ impl Polls {
     /// Counts one run of a command and gives the run whose result to await, if
     /// `awaits`. The run becomes the command's latest, so until its result is read
     /// the next run does not follow a failure; a run whose result is not awaited
-    /// leaves that unknown.
+    /// leaves that unknown. A blank command counts as a command, as
+    /// `codex_commands_not_paired` counts it too, but is never a poll or rerun.
     fn observe(
         &mut self,
         s: &Session,
@@ -212,6 +213,12 @@ impl Polls {
         awaits: bool,
     ) -> Option<Awaited> {
         let key = cmd.trim();
+        if in_window {
+            self.totals
+                .entry((s.agent, s.scope()))
+                .or_default()
+                .commands += 1;
+        }
         if key.is_empty() {
             return None;
         }
@@ -219,7 +226,6 @@ impl Polls {
         let mut poll = None;
         if in_window {
             let total = self.totals.entry((s.agent, s.scope())).or_default();
-            total.commands += 1;
             if let Some(prev_edits) = previous {
                 let class = verb_class(key, &mut |w| self.programs.has(w));
                 let verb = self.verbs.entry((s.agent, class.clone())).or_default();
