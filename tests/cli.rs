@@ -127,6 +127,13 @@ fn startup_measures_main_sessions_started_in_the_window() {
 }
 
 #[test]
+fn startup_alone_stops_reading_at_the_first_reply() {
+    // The main session ends in a cut line long after its first reply.
+    assert_eq!(report("startup", &[])["roots"][0]["lines_skipped"], 0);
+    assert_eq!(report("all", &[])["roots"][0]["lines_skipped"], 1);
+}
+
+#[test]
 fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let doc = report("schemas", &[]);
     let s = &doc["detectors"]["schemas"]["summary"];
@@ -539,6 +546,98 @@ fn assert_no_sentinel(claude: &str, codex: &str) {
 fn output_never_contains_transcript_content() {
     assert_no_sentinel(CLAUDE, CODEX);
     assert_no_sentinel(RESULTS, CODEX);
+    assert_no_sentinel(KINDS, CODEX);
+}
+
+/// One main session with the attachment kinds, hook errors and pipe result the main
+/// fixtures lack.
+const KINDS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kinds/claude");
+
+fn kinds(cmd: &str) -> Value {
+    let (code, stdout, stderr) = run(&[
+        cmd,
+        "--agent",
+        "claude",
+        "--claude-root",
+        KINDS,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn startup_sizes_the_other_attachment_kinds() {
+    let doc = kinds("startup");
+    let r = rows(&doc, "startup", 0);
+    for (piece, chars) in [
+        ("agent listing", 7),
+        ("system prompt", 4),
+        ("session context", 9),
+        ("environment", 10),
+        ("attachment: custom_thing", 29),
+    ] {
+        assert_eq!(
+            find(r, &[("piece", json!(piece))])["median_chars"],
+            chars,
+            "{piece}"
+        );
+    }
+    assert_eq!(
+        r.len(),
+        5,
+        "hook errors after the first reply are not startup"
+    );
+}
+
+#[test]
+fn hooks_count_both_error_kinds() {
+    let doc = kinds("hooks");
+    let r = rows(&doc, "hooks", 0);
+    assert_eq!(r.len(), 2);
+    for (hook, ms) in [("guard.exe", 50), ("hub-digest.js", 30)] {
+        let row = find(r, &[("hook", json!(hook))]);
+        assert_eq!(
+            (
+                row["runs"].clone(),
+                row["errors"].clone(),
+                row["cancelled"].clone(),
+                row["median_ms"].clone()
+            ),
+            (json!(1), json!(1), json!(0), json!(ms)),
+            "{hook}"
+        );
+    }
+}
+
+#[test]
+fn pipes_count_a_result_with_no_pass_or_fail_line() {
+    let doc = kinds("pipes");
+    let s = &doc["detectors"]["pipes"]["summary"];
+    assert_eq!(
+        (
+            s["unguarded_results_found"].clone(),
+            s["showed_a_failure_but_reported_success"].clone(),
+            s["showed_no_pass_or_fail_line"].clone()
+        ),
+        (json!(1), json!(0), json!(1))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_transcript_that_cannot_be_opened_counts_as_unreadable() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unreadable");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    std::os::unix::fs::symlink(dir.join("missing"), dir.join("gone.jsonl")).expect("symlink");
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&["hooks", "--claude-root", root, "--since", SINCE, "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["unreadable"], 1);
 }
 
 #[test]

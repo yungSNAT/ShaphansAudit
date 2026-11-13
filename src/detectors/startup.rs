@@ -47,11 +47,15 @@ impl Detector for Startup {
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {
-        if s.subagent || self.cur.replied || self.cur.started_in_window == Some(false) {
+        if self.done(s) {
             return false;
         }
         let shape = !self.cur.shape_seen && line.contains("\"type\":\"api-request-shape\"");
         shape || line.contains("\"type\":\"attachment\"") || line.contains("\"type\":\"assistant\"")
+    }
+
+    fn done(&self, s: &Session) -> bool {
+        s.subagent || self.cur.replied || self.cur.started_in_window == Some(false)
     }
 
     fn begin(&mut self, _s: &Session) {

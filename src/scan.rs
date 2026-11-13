@@ -70,6 +70,10 @@ pub trait Detector {
     fn wants(&self, s: &Session, line: &str) -> bool;
     fn begin(&mut self, _s: &Session) {}
     fn record(&mut self, s: &Session, r: &Record<'_>);
+    /// Whether the rest of this file can change nothing the detector reports.
+    fn done(&self, _s: &Session) -> bool {
+        false
+    }
     fn end(&mut self, _s: &Session) {}
     fn section(&self, opts: &Opts) -> Section;
 }
@@ -307,6 +311,9 @@ fn scan_file(
     };
     feed.line(&first);
     let result = loop {
+        if feed.active.iter().all(|&i| feed.dets[i].done(&session)) {
+            break Ok(());
+        }
         match lines.next_line() {
             Ok(Some(line)) => feed.line(line.trim_end()),
             Ok(None) => break Ok(()),
