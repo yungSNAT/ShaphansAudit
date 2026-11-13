@@ -1,13 +1,13 @@
 //! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash and
 //! Codex commands).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
 use super::{
-    CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of, text_of,
-    tool_results, tool_uses,
+    ClaudeCalls, CodexCalls, codex_call, codex_call_line, codex_output, input_str, name_of,
+    text_of, tool_results, tool_uses,
 };
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -48,8 +48,8 @@ impl Counts {
 /// Counts of test runs piped into `tail` or `head`.
 #[derive(Default)]
 pub struct Pipes {
-    /// Unguarded Claude runs by `tool_use` id.
-    pending: HashSet<String>,
+    /// Unguarded Claude runs whose result has not been read yet, by `tool_use` id.
+    claude: ClaudeCalls<()>,
     /// Codex `exec` calls with an unguarded test run whose output has not been read,
     /// with whether each command is one.
     codex: CodexCalls<bool>,
@@ -64,16 +64,13 @@ impl Detector for Pipes {
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => {
-                line.contains("\"Bash\"")
-                    || (!self.pending.is_empty() && line.contains("\"tool_result\""))
-            }
+            Agent::Claude => line.contains("\"tool_use\"") || self.claude.wants(line),
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
 
     fn begin(&mut self, _s: &Session) {
-        self.pending.clear();
+        self.claude.clear();
     }
 
     fn end(&mut self, _s: &Session) {
@@ -83,18 +80,21 @@ impl Detector for Pipes {
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         match s.agent {
             Agent::Claude => {
-                for b in tool_uses(r).filter(|b| name_of(b) == "Bash") {
-                    let id = b.get("id").and_then(Value::as_str).unwrap_or("");
-                    if r.in_window
+                for b in tool_uses(r) {
+                    let id = b.get("id").and_then(Value::as_str);
+                    let fresh = self.claude.note(id);
+                    if name_of(b) == "Bash"
+                        && r.in_window
                         && self.command(s.agent, input_str(b, "command").unwrap_or(""))
-                        && !id.is_empty()
+                        && fresh
+                        && let Some(id) = id
                     {
-                        self.pending.insert(id.to_owned());
+                        self.claude.wait(id, ());
                     }
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    if self.pending.remove(id) {
+                    if self.claude.take(id).is_some() {
                         let text = text_of(b.get("content").unwrap_or(&Value::Null));
                         let success = b.get("is_error").and_then(Value::as_bool) != Some(true);
                         self.result(s.agent, &text, success);
@@ -136,7 +136,7 @@ impl Detector for Pipes {
                     .to_owned(),
                 "Fix: set -o pipefail before the pipe, or keep the runner's own exit status."
                     .to_owned(),
-                "A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex outputs not paired counts the cells with an unguarded test run whose results could not be paired: the cell had no call id, another exec cell in the session had its call id, its output never came or it did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
+                "A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex outputs not paired counts the calls with an unguarded test run whose results could not be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or that did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
                     .to_owned(),
             ],
         }
@@ -180,9 +180,11 @@ impl Pipes {
             } else {
                 Vec::new()
             };
+            let runs = unguarded.contains(&true).then_some(unguarded);
             if call.exec {
-                let runs = unguarded.contains(&true).then_some(unguarded);
                 self.codex.call(&call.call_id, runs, r.in_window);
+            } else if let Some(runs) = runs {
+                self.codex.not_paired(runs.len(), r.in_window);
             }
         } else if let Some(out) = codex_output(r) {
             for (unguarded, res) in self.codex.pair(&out) {
@@ -209,5 +211,39 @@ impl Pipes {
                 c.no_pass_or_fail_shown += 1;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::detectors::{claude_tool_result, claude_tool_use, replay};
+
+    #[test]
+    fn a_reused_claude_tool_use_id_pairs_with_neither_run() {
+        let bash = |cmd: &str| json!({"command": cmd});
+        let failed = "test result: FAILED. 0 passed; 1 failed";
+        let lines: Vec<(bool, String)> = [
+            // The one result may be the ls block's, so the test run's is unknown.
+            claude_tool_use("x", "Bash", &bash("cargo test 2>&1 | tail -1")),
+            claude_tool_use("x", "Bash", &bash("ls")),
+            claude_tool_result("x", failed),
+            // A test run under an id that a Read block carried earlier.
+            claude_tool_use("y", "Read", &json!({"file_path": "/work/a.md"})),
+            claude_tool_use("y", "Bash", &bash("cargo test 2>&1 | tail -1")),
+            claude_tool_result("y", failed),
+        ]
+        .into_iter()
+        .map(|l| (true, l))
+        .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Pipes::default();
+        replay(&mut d, &s, &lines);
+        assert_eq!((d.n.unguarded, d.n.results), (2, 0));
     }
 }

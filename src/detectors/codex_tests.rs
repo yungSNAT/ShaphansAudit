@@ -6,30 +6,16 @@ use super::pipes::Pipes;
 use super::polls::Polls;
 use super::rereads::Rereads;
 use crate::report::Opts;
-use crate::scan::{Agent, Detector, Record, Session};
+use crate::scan::{Agent, Detector, Session};
 
 const MAIN: Session = Session {
     agent: Agent::Codex,
     subagent: false,
 };
 
-/// Feeds one Codex session to `d` as the scan does, parsing only the lines it
-/// wants; each line comes with whether it is in the window.
+/// Feeds one Codex session to `d` as the scan does.
 fn replay(d: &mut dyn Detector, lines: &[(bool, String)]) {
-    d.begin(&MAIN);
-    for (in_window, line) in lines {
-        if d.wants(&MAIN, line) {
-            let value: Value = serde_json::from_str(line).expect("test record");
-            d.record(
-                &MAIN,
-                &Record {
-                    value: &value,
-                    in_window: *in_window,
-                },
-            );
-        }
-    }
-    d.end(&MAIN);
+    super::replay(d, &MAIN, lines);
 }
 
 /// An `exec` call running `input`, with `id` as its call id unless `id` is "".
@@ -39,6 +25,13 @@ fn exec(id: &str, input: &str) -> String {
         p["call_id"] = json!(id);
     }
     json!({"type": "response_item", "payload": p}).to_string()
+}
+
+/// A `function_call` running `cmd` in a shell, under call id `id`.
+fn function_call(id: &str, cmd: &str) -> String {
+    let args = json!({"command": ["bash", "-lc", cmd]}).to_string();
+    json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": args, "call_id": id}})
+        .to_string()
 }
 
 /// Cell code that prints the `exec_command` result of each command in turn.
@@ -492,4 +485,41 @@ fn a_blank_command_counts_as_a_command_and_as_not_paired() {
         vec![json!(4), json!(0)]
     );
     assert_eq!(summary(&d, "codex_commands_not_paired"), 4);
+}
+
+#[test]
+fn function_call_commands_count_as_not_paired() {
+    // Their outputs are not read, so their results are never judged.
+    let patch = json!({"type": "response_item", "payload": {"type": "function_call", "name": "apply_patch", "arguments": "{}", "call_id": "p"}});
+    let lines = [
+        (true, function_call("f", "git status")),
+        (true, function_call("g", "git status")),
+        (true, patch.to_string()),
+        (false, function_call("h", "git log")),
+    ];
+    assert_eq!(polls(&lines), (counts(1, 0, 0), json!(2)));
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+
+    let mut d = Pipes::default();
+    replay(
+        &mut d,
+        &in_window(&[
+            function_call("t", "cargo test 2>&1 | tail -1"),
+            function_call("u", "cargo test"),
+        ]),
+    );
+    assert_eq!(summary(&d, "unguarded"), 1);
+    assert_eq!(summary(&d, "codex_outputs_not_paired"), 1);
+
+    let mut d = Rereads::default();
+    replay(
+        &mut d,
+        &in_window(&[
+            function_call("a", "cat /work/y.md"),
+            compacted(),
+            function_call("b", "cat /work/y.md"),
+        ]),
+    );
+    assert_eq!(first_row(&d, &["rereads"]), vec![json!(1)]);
+    assert_eq!(summary(&d, "codex_outputs_not_paired"), 1);
 }
