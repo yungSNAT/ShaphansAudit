@@ -228,13 +228,19 @@ fn synthetic(reply: &Value) -> bool {
 }
 
 /// A reply's recorded input tokens: new, cache writes and cache reads, or none when
-/// they are missing or their sum overflows.
+/// `input_tokens` is missing, a field is not a non-negative integer or their sum
+/// overflows. A missing or null cache field counts as 0.
 fn input_tokens(reply: &Value) -> Option<u64> {
     let usage = reply.pointer("/message/usage")?;
-    let field = |k: &str| usage.get(k).and_then(Value::as_u64);
-    field("input_tokens")?
-        .checked_add(field("cache_creation_input_tokens").unwrap_or(0))?
-        .checked_add(field("cache_read_input_tokens").unwrap_or(0))
+    let cache = |k: &str| match usage.get(k) {
+        None | Some(Value::Null) => Some(0),
+        Some(v) => v.as_u64(),
+    };
+    usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)?
+        .checked_add(cache("cache_creation_input_tokens")?)?
+        .checked_add(cache("cache_read_input_tokens")?)
 }
 
 /// The elements of a JSON array, or none for any other value.
@@ -326,6 +332,30 @@ mod tests {
             input_tokens(&reply("claude-x", r#"{"output_tokens":7}"#)),
             None
         );
+        assert_eq!(
+            input_tokens(&reply(
+                "claude-x",
+                r#"{"input_tokens":7,"cache_creation_input_tokens":null}"#
+            )),
+            Some(7)
+        );
+        assert_eq!(
+            input_tokens(&reply(
+                "claude-x",
+                r#"{"input_tokens":7,"cache_creation_input_tokens":"30"}"#
+            )),
+            None
+        );
+        for bad in [r#""30""#, "30.0", "30.5", "-30"] {
+            assert_eq!(
+                input_tokens(&reply(
+                    "claude-x",
+                    &format!(r#"{{"input_tokens":7,"cache_read_input_tokens":{bad}}}"#)
+                )),
+                None,
+                "cache_read_input_tokens {bad}"
+            );
+        }
         let max = u64::MAX;
         assert_eq!(
             input_tokens(&reply(
