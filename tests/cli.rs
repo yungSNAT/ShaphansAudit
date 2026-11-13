@@ -499,6 +499,7 @@ fn codex_counts_every_compressed_rollout_it_cannot_decode() {
         "zst-bad",
         &[
             ("cut.jsonl.zst", &packed[..packed.len() / 2]),
+            ("head.jsonl.zst", &packed[..5]),
             ("sum.jsonl.zst", &bad_sum),
             ("two.jsonl.zst", &two_frames),
             ("text.jsonl.zst", b"{\"type\":\"session_meta\"}\n"),
@@ -506,7 +507,7 @@ fn codex_counts_every_compressed_rollout_it_cannot_decode() {
     );
     assert_eq!(
         root_counts(&doc),
-        [&json!(3), &json!(3), &json!(0), &json!(1)]
+        [&json!(4), &json!(4), &json!(0), &json!(1)]
     );
 }
 
