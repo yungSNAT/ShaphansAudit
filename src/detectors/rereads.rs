@@ -87,12 +87,9 @@ impl Detector for Rereads {
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    if self.awaited.remove(id) {
-                        self.totals
-                            .entry((s.agent, s.scope()))
-                            .or_default()
-                            .reread_chars += result_chars(b.get("content").unwrap_or(&Value::Null));
-                    }
+                    self.returned(s, id, || {
+                        result_chars(b.get("content").unwrap_or(&Value::Null))
+                    });
                 }
             }
             Agent::Codex => {
@@ -105,13 +102,8 @@ impl Detector for Rereads {
                     if reread && !call.call_id.is_empty() {
                         self.awaited.insert(call.call_id);
                     }
-                } else if let Some(out) = codex_output(r)
-                    && self.awaited.remove(&out.call_id)
-                {
-                    self.totals
-                        .entry((s.agent, s.scope()))
-                        .or_default()
-                        .reread_chars += out.chars;
+                } else if let Some(out) = codex_output(r) {
+                    self.returned(s, &out.call_id, || out.chars);
                 }
             }
         }
@@ -184,6 +176,16 @@ impl Rereads {
         }
         let current = std::mem::take(&mut self.current);
         self.before.extend(current);
+    }
+
+    /// Adds the size of call `id`'s result when the call re-read.
+    fn returned(&mut self, s: &Session, id: &str, size: impl FnOnce() -> u64) {
+        if self.awaited.remove(id) {
+            self.totals
+                .entry((s.agent, s.scope()))
+                .or_default()
+                .reread_chars += size();
+        }
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.
