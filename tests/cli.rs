@@ -1031,7 +1031,7 @@ fn help_and_version_exit_zero() {
 }
 
 #[test]
-fn version_file_matches_the_crate() {
+fn release_files_match_the_crate() {
     // The release workflow refuses a tag whose VERSION differs from Cargo.toml. Like
     // release-policy, accept one line ending, LF or CRLF (a Windows checkout gives CRLF).
     let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("VERSION"))
@@ -1041,6 +1041,14 @@ fn version_file_matches_the_crate() {
         .or_else(|| text.strip_suffix('\n'))
         .unwrap_or(&text);
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    // It also refuses one whose RELEASE_NOTES.md does not start with the tag's heading.
+    let notes =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("RELEASE_NOTES.md"))
+            .expect("RELEASE_NOTES.md");
+    assert_eq!(
+        notes.lines().next(),
+        Some(format!("# v{}", env!("CARGO_PKG_VERSION")).as_str())
+    );
 }
 
 #[test]
