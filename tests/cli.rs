@@ -633,17 +633,15 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(6));
 }
 
-#[test]
-fn records_a_resumed_session_copies_from_another_file_count_once() {
-    // s-second resumes s-first: it starts with copies of s-first's 3 records, which keep
-    // their uuids and times, then runs the same test again.
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resumed");
+/// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
+fn claude_all(fixture: &str) -> Value {
+    let root = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
     let (code, stdout, stderr) = run(&[
         "all",
         "--agent",
         "claude",
         "--claude-root",
-        root,
+        &root,
         "--since",
         SINCE,
         "--json",
@@ -652,18 +650,54 @@ fn records_a_resumed_session_copies_from_another_file_count_once() {
     assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(root_counts(&doc)[0], &json!(2), "both files were read");
+    doc
+}
+
+fn claude_polls(doc: &Value) -> (Value, Value) {
+    let row = find(
+        rows(doc, "polls", 0),
+        &[("agent", json!("claude")), ("scope", json!("main"))],
+    );
+    (row["commands"].clone(), row["polls"].clone())
+}
+
+#[test]
+fn records_a_resumed_session_copies_from_another_file_count_once() {
+    // s-second resumes s-first: it starts with copies of s-first's 3 records, which keep
+    // their uuids and times, then runs the same test again.
+    let doc = claude_all("resumed");
     assert_eq!(doc["detectors"]["startup"]["summary"]["sessions"], 1);
     assert_eq!(doc["detectors"]["pipes"]["summary"]["test_runs"], 2);
     assert_eq!(rows(&doc, "hooks", 0)[0]["runs"], 1);
     // The copied run still counts as the run the new one repeats.
-    let polls = find(
-        rows(&doc, "polls", 0),
-        &[("agent", json!("claude")), ("scope", json!("main"))],
-    );
-    assert_eq!(
-        (polls["commands"].clone(), polls["polls"].clone()),
-        (json!(2), json!(1))
-    );
+    assert_eq!(claude_polls(&doc), (json!(2), json!(1)));
+}
+
+#[test]
+fn a_copy_of_part_of_a_session_counts_once_whichever_path_sorts_first() {
+    // s-a copies the last 3 records of s-b, from its compaction on, then runs the test
+    // again. s-a sorts first by path but s-b is read first: each later run polls the one
+    // before, which the copy alone never saw.
+    let doc = claude_all("resumed-slice");
+    assert_eq!(claude_polls(&doc), (json!(3), json!(2)));
+}
+
+#[test]
+fn startup_skips_copied_records_after_a_resumed_session_starts() {
+    // s-b resumes s-a: a new hook runs, then come copies of s-a's hook and reply, then
+    // s-b's own first reply, which records no tokens.
+    let doc = claude_all("resumed-startup");
+    let s = &doc["detectors"]["startup"]["summary"];
+    assert_eq!(s["sessions"], 2);
+    assert_eq!(s["sessions_with_request_tokens"], 1);
+    let r = rows(&doc, "startup", 0);
+    for piece in ["hook: rtk", "hook: agent-heavy"] {
+        assert_eq!(
+            find(r, &[("piece", json!(piece))])["sessions"],
+            1,
+            "{piece}"
+        );
+    }
 }
 
 #[test]

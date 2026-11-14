@@ -1,0 +1,5 @@
+{"type":"assistant","uuid":"u1","sessionId":"s-b","timestamp":"2026-11-08T01:00:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test 2>&1 | tail -5"}}]}}
+{"type":"user","uuid":"u1r","sessionId":"s-b","timestamp":"2026-11-08T01:01:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"test result: ok. SENTINEL-RESULT"}]}}
+{"type":"system","subtype":"compact_boundary","uuid":"u2","sessionId":"s-b","timestamp":"2026-11-08T01:02:00.000Z","content":"SENTINEL-COMPACT","compactMetadata":{"trigger":"auto","preTokens":100}}
+{"type":"assistant","uuid":"u3","sessionId":"s-b","timestamp":"2026-11-08T01:03:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"cargo test 2>&1 | tail -5"}}]}}
+{"type":"user","uuid":"u3r","sessionId":"s-b","timestamp":"2026-11-08T01:04:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"test result: ok. SENTINEL-RESULT"}]}}
