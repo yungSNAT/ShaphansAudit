@@ -1,0 +1,38 @@
+name: Release
+
+# A v* tag on main's head publishes shaphan through release-policy's binary
+# family: Linux (x86_64, static) and Windows (x86_64) executables, source
+# archives, SBOMs, SHA256SUMS and signed provenance in one release. The family
+# builds no macOS target yet. VERSION and Cargo.toml must agree; release-policy
+# refuses a tag that names another version.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # A job that calls a reusable workflow accepts no timeout-minutes; every
+    # job in release-binary.yml sets its own.
+    permissions:
+      actions: read # Read this repository's own runs to require the mandatory checks.
+      attestations: write # Record provenance and SBOM attestations for release assets.
+      contents: write # Create the draft release, upload assets and publish it.
+      id-token: write # Obtain the OIDC identity required to sign attestations.
+    uses: ryanduguid/release-policy/.github/workflows/release-binary.yml@ca5492bd09693be9e1fd47d980e2740ef8daf023 # canaries.json current pin
+    with:
+      artifact-stem: shaphansaudit
+      binary: shaphan
+      # The ci.yml jobs that must have passed on main for the tagged commit.
+      required-checks: |
+        .github/workflows/ci.yml: check (ubuntu-latest)
+        .github/workflows/ci.yml: check (macos-latest)
+        .github/workflows/ci.yml: check (windows-latest)
