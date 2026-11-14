@@ -692,7 +692,11 @@ fn startup_skips_copied_records_after_a_resumed_session_starts() {
     assert_eq!(s["sessions_with_request_tokens"], 1);
     let r = rows(&doc, "startup", 0);
     for piece in ["hook: rtk", "hook: agent-heavy"] {
-        assert_eq!(find(r, &[("piece", json!(piece))])["sessions"], 1, "{piece}");
+        assert_eq!(
+            find(r, &[("piece", json!(piece))])["sessions"],
+            1,
+            "{piece}"
+        );
     }
 }
 
