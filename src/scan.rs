@@ -128,7 +128,13 @@ pub fn scan(
             bad_lines: 0,
             compressed: 0,
         };
-        for path in list_files(root, cutoff, &mut st) {
+        let mut files = list_files(root, cutoff, &mut st);
+        if *agent == Agent::Claude {
+            // A copied record keeps its time, so reading by each file's first time reads
+            // an original before a copy of part of it, whose first record is later.
+            files.sort_by_cached_key(|p| first_time(p));
+        }
+        for path in files {
             let reader = match open(&path) {
                 Ok(r) => r,
                 Err(Open::NotZstd) => {
@@ -185,6 +191,20 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
     }
     out.sort();
     out
+}
+
+/// The top-level `timestamp` of a transcript's first record that has one, or `None`
+/// when no record has one or the file cannot be read.
+fn first_time(path: &Path) -> Option<DateTime<Utc>> {
+    let mut lines = Lines::new(open(path).ok()?);
+    while let Ok(Some(line)) = lines.next_line() {
+        let value = serde_json::from_str::<Value>(line.trim_end()).ok();
+        let t = value.as_ref().and_then(|v| v.get("timestamp"));
+        if let Some(t) = t.and_then(Value::as_str).and_then(parse_ts) {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// The longest line read, in bytes. A decoded `*.jsonl.zst` line is not bounded by

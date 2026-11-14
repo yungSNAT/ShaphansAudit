@@ -70,6 +70,11 @@ impl Detector for Startup {
         if cur.started_in_window.is_none() {
             cur.started_in_window = Some(r.in_window);
         }
+        // After a start in the window, a record outside it, such as a copy from the
+        // session this one resumes, is not part of this session's start.
+        if !r.in_window {
+            return;
+        }
         if cur.entrypoint.is_none() {
             cur.entrypoint = r
                 .value
