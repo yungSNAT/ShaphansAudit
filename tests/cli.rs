@@ -634,6 +634,39 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
 }
 
 #[test]
+fn records_a_resumed_session_copies_from_another_file_count_once() {
+    // s-second resumes s-first: it starts with copies of s-first's 3 records, which keep
+    // their uuids and times, then runs the same test again.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/resumed");
+    let (code, stdout, stderr) = run(&[
+        "all",
+        "--agent",
+        "claude",
+        "--claude-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(root_counts(&doc)[0], &json!(2), "both files were read");
+    assert_eq!(doc["detectors"]["startup"]["summary"]["sessions"], 1);
+    assert_eq!(doc["detectors"]["pipes"]["summary"]["test_runs"], 2);
+    assert_eq!(rows(&doc, "hooks", 0)[0]["runs"], 1);
+    // The copied run still counts as the run the new one repeats.
+    let polls = find(
+        rows(&doc, "polls", 0),
+        &[("agent", json!("claude")), ("scope", json!("main"))],
+    );
+    assert_eq!(
+        (polls["commands"].clone(), polls["polls"].clone()),
+        (json!(2), json!(1))
+    );
+}
+
+#[test]
 fn codex_default_reads_archived_sessions_and_counts_compressed_files() {
     let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-archived");
     let _ = std::fs::remove_dir_all(&home);

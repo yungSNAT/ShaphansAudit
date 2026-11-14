@@ -107,6 +107,12 @@ pub fn scan(
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut out = Vec::new();
+    // The `uuid` of each Claude record parsed in an earlier file.
+    //
+    // shortcut: every uuid of the scan is held as a string, about 100 bytes each (a
+    // million uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as
+    // the 128-bit number it spells would cut that to about a quarter.
+    let mut earlier = HashSet::new();
     for (agent, root) in roots {
         let active: Vec<usize> = (0..dets.len())
             .filter(|&i| dets[i].agents().contains(agent))
@@ -136,7 +142,7 @@ pub fn scan(
                 }
             };
             st.files += 1;
-            if scan_file(reader, &path, *agent, since, dets, &active, &mut st).is_err() {
+            if scan_file(reader, &path, since, dets, &active, &mut st, &mut earlier).is_err() {
                 st.unreadable += 1;
             }
         }
@@ -301,11 +307,11 @@ impl Lines {
 fn scan_file(
     reader: Box<dyn BufRead>,
     path: &Path,
-    agent: Agent,
     since: DateTime<Utc>,
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
+    earlier: &mut HashSet<String>,
 ) -> io::Result<()> {
     let mut lines = Lines::new(reader);
     let Some(first) = lines.next_line()? else {
@@ -313,6 +319,7 @@ fn scan_file(
         return Ok(());
     };
     let first = first.trim_start_matches('\u{feff}').trim_end().to_owned();
+    let agent = st.agent;
     let session = Session {
         agent,
         subagent: is_subagent(agent, path, &first),
@@ -325,6 +332,7 @@ fn scan_file(
         since,
         last_time: None,
         uuids: HashSet::new(),
+        earlier,
         dets,
         active,
         st,
@@ -344,6 +352,8 @@ fn scan_file(
     for &i in active {
         feed.dets[i].end(&session);
     }
+    let uuids = feed.uuids;
+    earlier.extend(uuids);
     result
 }
 
@@ -368,6 +378,8 @@ struct Feed<'a> {
     last_time: Option<DateTime<Utc>>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
+    /// The `uuid` of each Claude record parsed in an earlier file.
+    earlier: &'a HashSet<String>,
     dets: &'a mut [Box<dyn Detector>],
     active: &'a [usize],
     st: &'a mut RootStats,
@@ -400,12 +412,17 @@ impl Feed<'_> {
             self.st.bad_lines += 1;
             return;
         };
-        // Claude Code can write a record again later in its file, with the same uuid.
+        // Claude Code can write a record again later in its file, with the same uuid. A
+        // resumed session's file starts with copies of the earlier file's records; such a
+        // copy still builds the session's state but counts nowhere.
+        let mut copied = false;
         if self.session.agent == Agent::Claude
             && let Some(uuid) = value.get("uuid").and_then(Value::as_str)
-            && !self.uuids.insert(uuid.to_owned())
         {
-            return;
+            if !self.uuids.insert(uuid.to_owned()) {
+                return;
+            }
+            copied = self.earlier.contains(uuid);
         }
         if let Some(t) = value
             .get("timestamp")
@@ -416,7 +433,7 @@ impl Feed<'_> {
         }
         let rec = Record {
             value: &value,
-            in_window: self.last_time.is_some_and(|t| t >= self.since),
+            in_window: !copied && self.last_time.is_some_and(|t| t >= self.since),
         };
         for i in wanting {
             self.dets[i].record(&self.session, &rec);
@@ -490,11 +507,11 @@ mod tests {
             scan_file(
                 reader,
                 path,
-                agent,
                 DateTime::<Utc>::MIN_UTC,
                 &mut dets,
                 &[0],
                 &mut st,
+                &mut HashSet::new(),
             )
             .expect("read");
             assert_eq!(n.get(), want, "{agent:?}");
