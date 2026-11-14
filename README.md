@@ -21,7 +21,37 @@ It prints names, paths, counts, sizes and times, as listed under [Privacy](#priv
 
 ## Install
 
-There is no prebuilt download yet. With Rust 1.99 or later installed, this builds and installs `shaphan`:
+Each [release](https://github.com/yungSNAT/ShaphansAudit/releases) carries `shaphan` for Windows (x86_64) and Linux (x86_64, statically linked), with a `SHA256SUMS` file and signed build provenance. There is no macOS build yet; install from source there.
+
+On Linux, this downloads v0.1.0, stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
+
+```bash
+base=https://github.com/yungSNAT/ShaphansAudit/releases/download/v0.1.0
+asset=shaphansaudit-0.1.0-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO "$base/$asset" && curl -fsSLO "$base/SHA256SUMS" &&
+  awk -v f="$asset" '$2 == f' SHA256SUMS | sha256sum --check &&
+  mkdir -p ~/.local/bin && tar -xzf "$asset" -C ~/.local/bin shaphan &&
+  ~/.local/bin/shaphan --version
+```
+
+On Windows, in PowerShell:
+
+```powershell
+$base = 'https://github.com/yungSNAT/ShaphansAudit/releases/download/v0.1.0'
+$asset = 'shaphansaudit-0.1.0-x86_64-pc-windows-msvc.zip'
+Invoke-WebRequest "$base/$asset" -OutFile $asset
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
+$sum = (Select-String -Path SHA256SUMS -SimpleMatch $asset).Line.Split(' ')[0]
+if ((Get-FileHash $asset -Algorithm SHA256).Hash -ne $sum) { throw 'checksum mismatch' }
+Expand-Archive $asset "$env:LOCALAPPDATA\Programs\shaphan" -Force
+& "$env:LOCALAPPDATA\Programs\shaphan\shaphan.exe" --version
+```
+
+A matching checksum shows the download is intact, not who built it. To check that too, run `gh attestation verify <file> --repo yungSNAT/ShaphansAudit --signer-workflow ryanduguid/release-policy/.github/workflows/release-binary.yml --source-ref refs/tags/v0.1.0` with the [GitHub CLI](https://cli.github.com/); [Verify a release](https://github.com/ryanduguid/release-policy/blob/main/docs/verify-a-release.md) explains what it proves.
+
+### From source
+
+With Rust 1.99 or later installed, this builds and installs `shaphan`:
 
 ```bash
 cargo install --locked --git https://github.com/yungSNAT/ShaphansAudit
