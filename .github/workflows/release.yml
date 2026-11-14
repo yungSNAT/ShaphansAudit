@@ -3,7 +3,8 @@ name: Release
 # A v* tag on main's head publishes shaphan through release-policy's binary
 # family: Linux (x86_64, static) and Windows (x86_64) executables, source
 # archives, SBOMs, SHA256SUMS and signed provenance in one release. The family
-# builds no macOS target yet. VERSION and Cargo.toml must agree; release-policy
+# builds no macOS target yet. VERSION, Cargo.toml and the first line of
+# RELEASE_NOTES.md must agree (tests/cli.rs); release-policy
 # refuses a tag that names another version.
 
 on:
