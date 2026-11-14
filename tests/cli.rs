@@ -1032,10 +1032,15 @@ fn help_and_version_exit_zero() {
 
 #[test]
 fn version_file_matches_the_crate() {
-    // The release workflow refuses a tag whose VERSION differs from Cargo.toml.
-    let version = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("VERSION"))
+    // The release workflow refuses a tag whose VERSION differs from Cargo.toml. Like
+    // release-policy, accept one line ending, LF or CRLF (a Windows checkout gives CRLF).
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("VERSION"))
         .expect("VERSION");
-    assert_eq!(version, format!("{}\n", env!("CARGO_PKG_VERSION")));
+    let version = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
